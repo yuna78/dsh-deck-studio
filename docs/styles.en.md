@@ -6,7 +6,7 @@ language for the images.
 
 ## 1. Use preset styles (recommended starting point)
 
-Designs page → **＋ Import preset styles** imports the 8 styles below in one click (each ships with
+Designs page → **＋ Import preset styles** imports the 9 styles below in one click (each ships with
 3 real baseline samples: cover / info page / data page). It is idempotent — existing abbreviations are
 skipped, never duplicated.
 
@@ -20,6 +20,7 @@ skipped, never duplicated.
 | SKT | Hand-drawn whiteboard (workshop) | Whiteboard + markers + sticky notes + handwritten headings | Workshops, co-creation, training |
 | SWS | Swiss minimal (black/white/red) | Pure white + oversized black type + true red + generous whitespace | Minimal manifestos, big-type posters |
 | GRD | Aurora gradient (modern SaaS) | Violet-cyan aurora gradients + glow + 3D abstraction + glass cards | Product launches, internet style |
+| DSA | Deep Sea Amber (deep teal + gold hairlines) | Near-ink teal base + champagne-gold hairlines + serif headlines + generous whitespace | Premium talks, dark narratives, big-type covers |
 
 Definitions: `plugin/deck-studio/seeds/styles/<ABBR>.json`; samples:
 `plugin/deck-studio/seeds/samples/<ABBR>-0{1,2,3}.jpg` (3 baseline samples, 1280-wide previews).

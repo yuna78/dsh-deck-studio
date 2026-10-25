@@ -100,8 +100,10 @@ export const DOC_SPECS = [
   {
     id: "review",
     label: "审稿",
-    purpose: "交付前问题清单：严重度 / 位置 / 证据 / 修复建议 + 是否可交付",
-    candidates: ["review.md"],
+    // F-187：评审产出按「读者 → 负责人 → 工程」排序，听众读后感放第一个（原来只有工程口径的 review.md）。
+    purpose: "听众读后感（人话）· 意图与听众差距 · 工程口径的问题清单 / 证据 / 修复建议",
+    candidates: ["review.readers.md", "review.gap.md", "review.md", "review.experts.md", "review.images.md", "review.scores.md"],
+    aliases: ["review.readers.md", "review.gap.md", "review.experts.md", "review.images.md", "review.scores.md"],
     template: "review",
   },
   {
@@ -412,13 +414,17 @@ export function buildChangeFeed({ entries = [], revisions = [], events = [] }) {
   }
   for (const revision of revisions) {
     const pageIds = revision.pageIds ?? revision.slideIds ?? (revision.page ? [revision.page] : []);
+    // F-173：首稿自动落版的 revision 要有醒目标记（徽标 + 自改摘要），否则用户看不出「这版没经过确认」。
+    const badge = String(revision.autolandBadge ?? "");
+    const autoland = revision.autoland && typeof revision.autoland === "object" ? revision.autoland : null;
     rows.push({
       date: revision.savedAt || "",
-      kind: "改脚本",
+      kind: badge || "改脚本",
       page: pageIds.join(","),
-      note: revision.note || "script 编辑",
-      actor: revision.actor || "",
+      note: revision.note || (autoland?.selfReview?.summary ? `自改摘要：${autoland.selfReview.summary}` : "script 编辑"),
+      actor: autoland ? "agent（自动落版）" : revision.actor || "",
       revision: revision.revision || "",
+      ...(autoland ? { autoland: { ...autoland, badge: badge || "首稿（自动落版，未经确认）" } } : {}),
     });
   }
   for (const event of events) {
@@ -810,7 +816,7 @@ export function resolveDeckDocs({ adapter, deckDir, render = {}, revisions = [],
  * 读取单份文档：正文 + 结构化视图，供中间区对应标签渲染。
  * @param {object} input
  */
-export function readDeckDoc({ adapter, deckDir, docId, render = {}, revisions = [], events = [] }) {
+export function readDeckDoc({ adapter, deckDir, docId, file = "", render = {}, revisions = [], events = [] }) {
   const spec = DOC_SPECS.find((item) => item.id === docId);
   if (!spec) return null;
   const { docs } = resolveDeckDocs({ adapter, deckDir, render, revisions, events });
@@ -818,7 +824,39 @@ export function readDeckDoc({ adapter, deckDir, docId, render = {}, revisions = 
   const sourceRoot = adapter?.sourceRoot ?? "";
   const draftFile = draftPath(deckDir, docId);
   const sourceFile = spec.candidates.map((name) => join(sourceRoot, name)).find((file) => existsSync(file));
-  const primaryFile = sourceFile ?? (existsSync(draftFile) ? draftFile : null);
+  let primaryFile = sourceFile ?? (existsSync(draftFile) ? draftFile : null);
+  // F-187：评审产物写在 deck 工作副本的 docs/ 下（review.readers.md / review.gap.md 等），
+  // 不是源 deck 的候选文件；这里按「读者 → 负责人 → 工程」顺序找第一个存在的当作正文。
+  if (docId === "review") {
+    const preferred = spec.candidates.map((name) => join(deckDir, "docs", name)).find((file) => existsSync(file));
+    if (preferred) {
+      primaryFile = preferred;
+      doc.primary = `docs/${preferred.split(/[\\/]/).pop()}`;
+      // 人话版是散文体（没有「严重度」表格），不该被表格解析判成 partial。
+      const human = /review\.(readers|gap)\.md$/.test(preferred);
+      if (human || doc.status === "missing") {
+        doc.status = human ? "ok" : "draft";
+        doc.issues = [];
+      }
+      // 指定了相关文件（工作台点 chip）就读它；只允许本 deck docs/ 下的 review.* 文件。
+      const wanted = String(file ?? "").trim();
+      if (wanted && /^docs\/review\.[a-z]+\.(md|json)$/.test(wanted)) {
+        const target = join(deckDir, wanted);
+        if (existsSync(target) && statSync(target).isFile()) {
+          primaryFile = target;
+          doc.primary = wanted;
+          doc.status = "ok";
+          doc.issues = [];
+        }
+      }
+      // 「相关文件」按顺序列出存在的几本，工作台文档页可以逐个打开。
+      for (const name of spec.aliases ?? []) {
+        const file = join(deckDir, "docs", name);
+        if (!existsSync(file) || !statSync(file).isFile()) continue;
+        doc.files.push({ name: `docs/${name}`, exists: true, role: "相关", sizeBytes: statSync(file).size });
+      }
+    }
+  }
   const content = primaryFile ? readText(primaryFile) ?? "" : "";
   const script = adapter?.readScriptRaw?.() ?? readText(join(sourceRoot, "script.md")) ?? "";
   const pages = adapter?.storyPages?.() ?? [];

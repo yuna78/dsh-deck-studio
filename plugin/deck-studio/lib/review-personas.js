@@ -47,14 +47,61 @@ export function splitAudience(audience) {
   if (!raw) return [];
   const colon = raw.search(/[：:]/);
   const head = colon >= 0 ? raw.slice(0, colon).trim() : raw;
-  return head
-    .split(/[、，,；;\/|\n]+/)
+  return mergeContinuations(splitTopLevel(head))
     .map((part) => part.trim())
     .filter((part) => part.length > 0)
     // 「技术负责人和技术团队」这种句子里再拆一层
     .flatMap((part) => part.split(/\s*(?:以及|还有|和|与|及)\s*/))
     .map((part) => part.replace(/^[·\-*\s]+|[。；;，,.\s]+$/g, "").trim())
+    // 听众常写成「角色 + 一串说明」：取角色那一段（第一个逗号前），不要整句当标签
+    .map((part) => (part.length > 40 ? part.split(/[，,]/)[0].trim() : part))
     .filter((part) => part.length > 0 && part.length <= 40);
+}
+
+/**
+ * 只按顶层分隔符切分：`研发工程师（前端 / 后端 / 算法）` 是一个听众，不是三个。
+ * 括号（含中英文 / 【】/ 直角引号）里的分隔符属于描述，不参与切分。
+ */
+function splitTopLevel(text) {
+  const open = new Set(["（", "(", "【", "[", "「", "『"]);
+  const close = new Set(["）", ")", "】", "]", "」", "』"]);
+  const separators = new Set([..."、，,；;/|\n"]);
+  const parts = [];
+  let depth = 0;
+  let buffer = "";
+  for (const char of String(text ?? "")) {
+    if (open.has(char)) depth += 1;
+    else if (close.has(char)) depth = Math.max(0, depth - 1);
+    if (depth === 0 && separators.has(char)) {
+      parts.push(buffer);
+      buffer = "";
+      continue;
+    }
+    buffer += char;
+  }
+  parts.push(buffer);
+  return parts;
+}
+
+/**
+ * 说明性片段并回上一个听众：真实 intent 常写「角色（范围），日常…，但…，没有…」，
+ * 逗号后面是处境说明，不是第二个听众。以连接词 / 转折词开头或过长的片段一律并回去。
+ */
+function mergeContinuations(parts) {
+  const merged = [];
+  let sticky = false; // 一旦进入「处境说明」，后面都算同一句说明，直到用尽
+  for (const raw of parts) {
+    const part = String(raw ?? "").trim();
+    if (!part) continue;
+    const looksLikeExplanation = /^(日常|平时|现在|目前|大多|一般|主要|同时|另外|但|而|也|还|会|被|没有|其实|就是|比如|例如|系统|并未)/.test(part) || part.length > 30;
+    if (merged.length && (sticky || looksLikeExplanation)) {
+      merged[merged.length - 1] = `${merged[merged.length - 1]}，${part}`;
+      sticky = true;
+      continue;
+    }
+    merged.push(part);
+  }
+  return merged;
 }
 
 /** 同一个听众去重（大小写 / 空格不敏感）。 */

@@ -7,7 +7,7 @@ Deckline（`dsh-plugin-deck-studio`）是 DeepSeek Harness（DSH）的 **image d
 它不是独立 App，必须挂在 DSH 的 profile 上运行。
 
 > 目标用户：用 DSH 做内容/演示的人。装完后你可以：读 script 改 deck、按页出图（可点名批量连出）、管理治理文档、
-> 登记自己的设计风格（上传样张），并用 8 个预设风格直接开工。
+> 登记自己的设计风格（上传样张），并用 9 个预设风格直接开工。
 
 ## 主助手基础能力（0.2.7起）
 
@@ -294,8 +294,8 @@ export DSH_DECK_IMAGE_API_KEY="sk-…"          # 只放在你的 shell / 密钥
 
 ### 用预设风格（不用自己写 prompt）
 
-Designs 页 **＋ 导入预设风格** 会一次导入 8 个自带风格（商务咨询 / 高端深色 fancy / 日系极简 /
-杂志编辑 / 科技蓝图 / 手绘白板 / 瑞士极简 / 渐变极光），每个都带样张，见 [docs/styles.md](styles.md)。
+Designs 页 **＋ 导入预设风格** 会一次导入 9 个自带风格（商务咨询 / 高端深色 fancy / 日系极简 /
+杂志编辑 / 科技蓝图 / 手绘白板 / 瑞士极简 / 渐变极光 / 深海琥珀），每个都带样张，见 [docs/styles.md](styles.md)。
 
 ## 6. 排障
 
@@ -328,7 +328,7 @@ dsh --profile deck-studio --no-open             # 本仓开发 profile（端口�
 | 左侧 DSH 外壳栏（工作区 / 会话） | 收起隐藏，只留 Deckline 导航 | profile 里 `hideShellSidebar: false` |
 | Decks 页 | 自动登记 **Deckline 示例手册**（仓库 `samples/deckline-intro`，只读） | 配了任意 `decks[]` 就不登记；或 `bootstrap: false` |
 | 资源库 | 自动拷入品牌素材（logo / mark）到 `<dataRoot>/resources` | 该目录非空时不动；或 `bootstrap: false` |
-| Designs 页 | 自动导入 8 个预设风格（含样张） | 已有风格时不重复；或 `bootstrap: false` |
+| Designs 页 | 自动导入 9 个预设风格（含样张） | 已有风格时不重复；或 `bootstrap: false` |
 | 问候语 / 新 deck 作者 | 首次启动弹「先记个名字」，存 `<dataRoot>/user.json`；首页显示「XX，欢迎你」，新 deck 的 owner / 封面作者默认用它 | 点「稍后」不写；之后可在 profile 里用 `userName` 覆盖 |
 
 自举只在「空」的时候发生，重复启动不会覆盖你已有的内容；想彻底关掉，在 profile patch 里给根挂载加

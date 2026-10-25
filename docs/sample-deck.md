@@ -41,7 +41,7 @@
   CHANGELOG.md —— v0.1.0 能力清单与边界
   docs/productization.md —— 产品化定位、路线图、发布范围、一期边界
   docs/install.md —— 安装、profile 配置、出图节点与 key 放置、fake 模式
-  docs/styles.md —— 8 个预设风格 + 自定义风格方法
+  docs/styles.md —— 9 个预设风格 + 自定义风格方法
   docs/sample-deck.md —— 用示例 deck 跑通流程（本页步骤来源）
 
 【2. 代码（真实链接）】

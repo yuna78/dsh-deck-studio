@@ -6,7 +6,7 @@ assets / conversations on the right. It is not a standalone app — it runs on a
 
 > Target users: people who build content and presentations with DSH. After setup you can edit a deck
 > from its script, render slide images on request (single page or a named batch), manage governance documents, register your own
-> design styles (with sample images) and start from 8 preset styles.
+> design styles (with sample images) and start from 9 preset styles.
 
 ## Assistant capabilities (0.2.7+)
 
@@ -239,9 +239,9 @@ Refresh the page afterwards. png / jpg / webp are supported; names are free-form
 
 ### Use preset styles (no prompt writing needed)
 
-**＋ Import preset styles** on the Designs page imports all 8 bundled styles (business consulting /
+**＋ Import preset styles** on the Designs page imports all 9 bundled styles (business consulting /
 premium dark / Japanese minimal / magazine editorial / tech blueprint / hand-drawn whiteboard /
-Swiss minimal / aurora gradient), each with samples. See [styles.md](styles.md).
+Swiss minimal / aurora gradient / deep-sea amber), each with samples. See [styles.md](styles.md).
 
 ## 6. Troubleshooting
 

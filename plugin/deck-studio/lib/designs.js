@@ -42,6 +42,21 @@ export function normalizeAbbr(value) {
 }
 
 /**
+ * 从风格名称推一个可用缩写（F-186：普通对话里登记风格时不用用户想缩写）。
+ * 规则与 normalizeAbbr 一致：2–6 位、字母开头；中文名没有拉丁字母时退化成 `ST01`。
+ */
+export function suggestAbbr(name, taken = []) {
+  const used = new Set((taken ?? []).map((value) => String(value ?? "").toUpperCase()).filter(Boolean));
+  const latin = String(name ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "").replace(/[0-9]/g, "");
+  const base = (latin.length >= 2 ? latin : "ST").slice(0, 4);
+  for (let index = 0; index < 500; index += 1) {
+    const candidate = index === 0 ? base : `${base.slice(0, 3)}${String(index).padStart(2, "0")}`;
+    if (candidate.length <= 6 && !used.has(candidate)) return candidate;
+  }
+  throw new Error("自动生成风格缩写失败（同名风格太多），请手动指定 abbr");
+}
+
+/**
  * @param {{dataRoot: string}} input
  */
 export function createDesignRegistry({ dataRoot }) {

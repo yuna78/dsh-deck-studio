@@ -30,6 +30,18 @@
 .brief-style-badge.is-unknown{border-color:#cdd6d4;background:#f4f7f6;color:#6b7b7a}
 .brief-cover{margin-left:6px;color:#4a5c5a}
 .brief-banner{border-color:#e0b96a;background:#fdf7e8}
+.review-panel{margin:10px 0 12px;padding:10px 12px;border:1px solid #cfd9e8;background:#f6f9fd;border-radius:10px}
+.review-row{display:grid;grid-template-columns:18px 132px 1fr 130px 1.2fr;gap:8px;align-items:center;padding:5px 0;border-top:1px dashed #dde5ef;font-size:12px}
+.review-row:first-of-type{border-top:none}
+.review-row-off{opacity:.55}
+.review-tag{color:#25507f;font-weight:600;font-size:11px}
+.review-why{color:#4a5464}
+.review-page{color:#7a8595;font-size:11px}
+.review-diff{display:flex;gap:6px;align-items:center;overflow:hidden}
+.review-diff .proposal-before{max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#8a8a8a}
+.review-diff .proposal-value{max-width:55%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#1d5c2e}
+.review-actions{display:flex;gap:10px;align-items:center;justify-content:flex-end;margin-top:8px}
+.review-hint{color:#7a8595;font-size:11px}
 .assoc-switch-panel{margin-top:10px;padding:12px 14px;border:1px dashed #d8b46a;border-radius:10px;background:#fffdf6}
 .assoc-switch-panel label{display:block;margin:6px 0;font-size:13px;color:#3c4a4c}
 .assoc-switch-panel .panel-actions{display:flex;gap:8px;margin-top:10px}
@@ -1399,8 +1411,19 @@ function docHeader(doc, extra = "") {
     <div><div class="eyebrow">Deck Document</div><h2>${esc(doc.label)}</h2></div>
     ${docBadge(doc.status)}
     <span class="small doc-file">${esc(doc.primary || "无文件")}</span>
+    ${(doc.files || []).length > 1 ? `<div class="doc-files">${doc.files.map((file) => `<button type="button" class="doc-file-chip${file.name === doc.primary ? " active" : ""}" data-doc-file="${esc(file.name)}" title="${esc(file.name)}">${esc(file.name.replace(/^docs\//, ""))}</button>`).join("")}</div>` : ""}
     ${extra}
   </div>`;
+}
+
+/** F-187：审稿页有读者本 / 差距本 / 工程本，点 chip 切换正文。 */
+async function openDocFile(docId, file) {
+  const deckId = STATE.data?.active?.deckId ?? "";
+  const res = await fetch(`/api/deck-studio.doc?` + new URLSearchParams({ deckId, docId, file }));
+  const doc = await res.json().catch(() => null);
+  if (!res.ok || !doc || doc.ok === false) return;
+  STATE.docCache[docId] = doc;
+  renderDocTab(docId);
 }
 
 function docFooter(doc, content) {
@@ -1557,7 +1580,25 @@ function renderDoc(doc, index) {
       const name = kind === "body" ? "正文" : "画面要求";
       return `<span class="density-count${off ? " is-off" : ""}" title="当前密度「${esc(densityTarget.label)}」：${name}目标 ${min}–${max} 字">${name} ${chars} 字${off ? ` · 目标 ${min}–${max}` : " · 达标"}</span>`;
     };
-    return head + styleNote + densityNote + briefBanner + docIssues(doc) + storyOverview + banner + `<div class="page-cards">${pages.map((page) => {
+    // F-176 / I-18：评审意见清单——带 reviewRef / severity / confidence 的提案合成一个可勾选清单，
+    // 勾完点「接受并更新」→ 一条 revision（不是一条提案一条）。C 类（原文找不到）根本不进提案。
+    const reviewBatch = actionablePending.filter((proposal) => proposal.reviewRef || proposal.severity || proposal.confidence);
+    const reviewRow = (proposal) => {
+      const confidence = String(proposal.confidence || "").toUpperCase();
+      const selectable = confidence !== "C";
+      const tag = [proposal.reviewRef, proposal.severity, confidence ? `证据 ${confidence}` : ""].filter(Boolean).join(" · ");
+      return `<label class="review-row${selectable ? "" : " review-row-off"}">
+        <input type="checkbox" data-review-pick="${esc(proposal.proposalId)}"${selectable ? (confidence === "D" ? "" : " checked") : " disabled"}>
+        <span class="review-tag">${esc(tag || "评审意见")}</span>
+        <span class="review-why">${esc(String(proposal.reason || proposal.evidence || "按评审意见修改").slice(0, 80))}</span>
+        <span class="review-page">${esc(proposal.pageId)} · ${esc(proposalFieldLabel(proposal.field))}</span>
+        <span class="review-diff"><span class="proposal-before">${esc(proposalCurrent(proposal) || "（空）")}</span><span class="proposal-arrow">→</span><span class="proposal-value">${esc(proposalPreview(proposal) || "（空值）")}</span></span>
+      </label>`;
+    };
+    const reviewPanel = reviewBatch.length
+      ? `<div class="review-panel"><p class="proposal-strip-note">评审意见 <b>${reviewBatch.length}</b> 条 · 勾选后点「接受并更新」合成<b>一条</b> revision（旧版保留，可回滚）；不点就什么都不改</p>${reviewBatch.map(reviewRow).join("")}<div class="review-actions"><button class="btn solid" data-accept-review="1">接受并更新所选</button><span class="review-hint">A=原文可定位；B=转述或支撑偏弱；D=原文在但推不出结论（默认不勾，只作参考）；C=无法核实，不进清单</span></div></div>`
+      : "";
+    return head + styleNote + densityNote + briefBanner + docIssues(doc) + storyOverview + banner + reviewPanel + `<div class="page-cards">${pages.map((page) => {
       const pageProposals = pendingByPage.get(Number(page.page)) || [];
       const slide = slideById.get(page.id) || {};
       // 已落版值（manifest）优先：确认过的 title/question/body 必须立刻显示，不能被源文档快照盖住。
@@ -1678,6 +1719,12 @@ function renderDoc(doc, index) {
   if (doc.id === "changelog") {
     const feed = doc.parsed.feed ?? [];
     const fmtWhen = (value) => String(value || "").replace("T", " ").slice(0, 16).replace(/-/g, "/");
+    // F-173：最新一版是首稿自动落版时，给出「这版没经过确认」+ 一键回滚。
+    const latestRevision = feed.map((row) => row.revision).filter(Boolean).sort().pop() || "";
+    const autoRow = feed.find((row) => row.autoland && row.autoland.revision === latestRevision && !row.autoland.rolledBack);
+    const rollbackBar = autoRow
+      ? `<div class="proposal-banner"><div><b>${esc(autoRow.autoland.badge || "首稿（自动落版，未经确认）")}</b><span>Agent 自改 ${esc(String(autoRow.autoland.selfReview?.rounds ?? 0))} 轮后直接落版，没有逐条等你确认。${autoRow.autoland.selfReview?.summary ? `主要改了：${esc(autoRow.autoland.selfReview.summary)}。` : ""}不满意可以回到落版前。</span></div><div class="proposal-banner-actions"><button class="btn alt" data-rollback-draft="${esc(autoRow.autoland.revision)}">回滚首稿</button></div></div>`
+      : "";
     const list = feed.length
       ? `<div class="change-feed">${feed.map((row) => `
           <div class="change-item">
@@ -1691,7 +1738,7 @@ function renderDoc(doc, index) {
             <div class="change-note">${row.note ? mdInline(row.note) : `<span class="small">系统记录，未写说明</span>`}</div>
           </div>`).join("")}</div>`
       : `<p class="engine-note">还没有变更记录：改一次 script / 出一次图就会自动出现在这里。</p>`;
-    return head + docIssues(doc) + list + `<p class="engine-note">这张日志由系统从版本与事件自动生成；Agent 每次改完 deck 只用补一句「为什么」（工具 <code>deck_note_change</code>），不需要手抄历史。</p>` + docFooter(doc, content);
+    return head + docIssues(doc) + rollbackBar + list + `<p class="engine-note">这张日志由系统从版本与事件自动生成；Agent 每次改完 deck 只用补一句「为什么」（工具 <code>deck_note_change</code>），不需要手抄历史。</p>` + docFooter(doc, content);
   }
   if (doc.id === "feedback") {
     const rows = doc.parsed.rows ?? [];
@@ -1822,7 +1869,7 @@ function flash(text, kind = "ok") {
 }
 
 /** F-108：在工作台直接落版 / 驳回提案（与 Agent 的 deck_revision_confirm 同一条写入路径）。 */
-async function decideProposals(proposalIds, confirmed) {
+async function decideProposals(proposalIds, confirmed, batch = false) {
   const ids = (proposalIds || []).filter(Boolean);
   if (!ids.length) return;
   const res = await fetch("/api/deck-studio.proposal-decide", {
@@ -1831,13 +1878,21 @@ async function decideProposals(proposalIds, confirmed) {
     body: JSON.stringify({
       proposalIds: ids,
       confirmed,
-      quote: confirmed ? "（工作台：用户点了「确认落版」）" : "（工作台：用户点了「驳回」）",
+      ...(batch ? { batch: true } : {}),
+      quote: confirmed ? (batch ? "（工作台：用户点了「接受并更新」）" : "（工作台：用户点了「确认落版」）") : "（工作台：用户点了「驳回」）",
     }),
   });
   let payload = {};
   try { payload = await res.json(); } catch { /* 非 JSON 响应走下面兜底 */ }
   if (!res.ok || !payload.ok) {
     flash(`操作失败：${payload?.error?.message || `HTTP ${res.status}`}`, "error");
+    return;
+  }
+  if (payload.batch) {
+    flash(`已接受并更新：${payload.decided} 条意见合成 revision ${payload.revision}（旧版保留，可回滚）`, "ok");
+    STATE.docCache = {};
+    await loadWorkbench(STATE.deckId);
+    if (["script", "design", "intent", "changelog"].includes(STATE.tab)) await renderDocTab(STATE.tab);
     return;
   }
   const failed = (payload.results || []).filter((item) => !item.ok);
@@ -1853,7 +1908,32 @@ async function decideProposals(proposalIds, confirmed) {
   if (["script", "design", "intent", "changelog"].includes(STATE.tab)) await renderDocTab(STATE.tab);
 }
 
+/** F-173：回滚首稿（回到自动落版前的内容，追加新 revision）。 */
+async function rollbackFirstDraft(revision) {
+  if (!STATE.deckId) return;
+  const res = await fetch("/api/deck-studio.draft-rollback", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ deckId: STATE.deckId, note: "（工作台：用户点了「回滚首稿」）" }),
+  });
+  let payload = {};
+  try { payload = await res.json(); } catch { /* 非 JSON 走兜底 */ }
+  if (!res.ok || !payload.ok) {
+    flash(`回滚失败：${payload?.error?.message || `HTTP ${res.status}`}`, "error");
+    return;
+  }
+  flash(`已回滚首稿：${payload.beforeRevision || revision} → ${payload.revision}（旧版保留）`, "ok");
+  STATE.docCache = {};
+  await loadWorkbench(STATE.deckId);
+  if (["script", "changelog"].includes(STATE.tab)) await renderDocTab(STATE.tab);
+}
+
 function bindDocActions(root) {
+  root.querySelectorAll("[data-doc-file]").forEach((btn) => btn.addEventListener("click", () => {
+    const file = btn.getAttribute("data-doc-file") || "";
+    if (file) openDocFile(STATE.tab, file);
+  }));
+  root.querySelectorAll("[data-rollback-draft]").forEach((btn) => btn.addEventListener("click", () => rollbackFirstDraft(btn.getAttribute("data-rollback-draft") || "")));
   root.querySelectorAll("[data-assoc-bind]").forEach((btn) => btn.addEventListener("click", () => bindDeckDesign(getEl("assocSelect")?.value || "")));
   root.querySelectorAll("[data-assoc-switch]").forEach((btn) => btn.addEventListener("click", openAssocSwitchPanel));
   root.querySelectorAll("[data-assoc-switch-confirm]").forEach((btn) => btn.addEventListener("click", confirmAssocSwitch));
@@ -1879,11 +1959,12 @@ function bindDocActions(root) {
   }));
   root.querySelectorAll("[data-assoc-unbind]").forEach((btn) => btn.addEventListener("click", () => bindDeckDesign("")));
   root.querySelectorAll("[data-doc-fill]").forEach((btn) => btn.addEventListener("click", () => askAgentForDoc(btn.dataset.docFill)));
-  // F-159：听众评审入口（脚本页）。评审只出意见，不改稿；改哪几条由用户说。
+  // F-159 / F-172：听众评审入口（脚本页）——两段式（盲审 → 冻结 → 对照）。
+  // 评审只出意见、不改稿；用户点这里是要「审完给结论再决定」，所以列完问题必须先问是否接受并更新。
   root.querySelectorAll("[data-script-review]").forEach((btn) =>
     btn.addEventListener("click", () =>
       sendPrompt(
-        `请调用 deck_script_review 评审 deck ${STATE.data.active.deckId} 的整份 script：按 intent 里的听众生成审稿人，只报告 P0/P1 与具体改法，不要直接改稿、不要出图。\n评审完先把 P0 逐条列给我（带页号），等我指定改哪几条，再用 deck_script_propose_edits 提案。`,
+        `请调用 deck_script_review（phase=full）评审 deck ${STATE.data.active.deckId} 的整份 script：按 intent 里的听众先生成审稿人做盲审（不给意图、逐页四问、结论冻结），再对照意图做三方差分；不要直接改稿、不要出图。\n评审完先告诉我：盲审覆盖率、判定「否 / 部分」的页（带页号 + 原文证据 + 改法）、可删可合并的页。然后按稿子状态分开处理：\n① 如果这份 deck 还一次都没落过版（首稿）：按「否 / 部分」自己改，最多 2 轮，然后用 deck_script_propose_edits 带 autoland: true + selfReviewRounds + selfReviewSummary 直接落版，落版后告我自改摘要和「可回滚」；\n② 如果已经有已落版 revision：停下来问我「是否接受并更新稿件」；我同意后按可采纳清单逐条提案（每条带 reviewRef/severity/confidence/evidence，C 类不提），变成脚本页的「评审意见」清单，我勾选后点「接受并更新」合成一条 revision。`,
       ),
     ),
   );
@@ -1910,6 +1991,17 @@ function bindDocActions(root) {
     decideProposals(ids, true);
   }));
   root.querySelectorAll("[data-confirm-all]").forEach((btn) => btn.addEventListener("click", () => decideProposals(freshProposalIds(), true)));
+  // F-176 / I-18：勾选的评审意见一次接受并更新（一条 revision）。
+  root.querySelectorAll("[data-accept-review]").forEach((btn) =>
+    btn.addEventListener("click", () => {
+      const picked = [...root.querySelectorAll("[data-review-pick]:checked")].map((input) => input.dataset.reviewPick).filter(Boolean);
+      if (!picked.length) {
+        flash("先勾选要采纳的意见（C 类无法核实，不能选）", "error");
+        return;
+      }
+      decideProposals(picked, true, true);
+    }),
+  );
   root.querySelectorAll("[data-reject-all]").forEach((btn) => btn.addEventListener("click", () => decideProposals(allPendingProposalIds(), false)));
   root.querySelectorAll("[data-reject-stale]").forEach((btn) => btn.addEventListener("click", () => decideProposals(String(btn.dataset.rejectStale || "").split(",").filter(Boolean), false)));
   root.querySelectorAll("[data-reject-expired-all]").forEach((btn) => btn.addEventListener("click", () => decideProposals(deckPendingProposals().filter((proposal) => proposal.stale).map((proposal) => proposal.proposalId), false)));

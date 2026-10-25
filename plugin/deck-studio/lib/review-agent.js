@@ -87,7 +87,7 @@ export function registerReviewAgentProvider(ctx, dependencies = {}) {
           request.agentOptions?.reasoningEffort === undefined) delete options.reasoningEffort;
       // Only model controls cross the boundary: no authoring/preset/runtime options.
       const agentOptions = { provider: options.provider, model: options.model,
-        maxTokens: request.agentOptions?.maxTokens ?? 4096,
+        maxTokens: request.agentOptions?.maxTokens ?? 8192,
         ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort }) };
       if (!agentOptions.provider || !agentOptions.model) throw new Error("Internal review requires an explicit provider/model route");
       if (!Number.isSafeInteger(agentOptions.maxTokens) || agentOptions.maxTokens <= 0) throw new Error("Invalid review output token limit");

@@ -26,9 +26,10 @@ import { contentDensityOptions, densitySpec, normalizeContentDensity } from "./l
 import { defineDeckTools } from "./lib/tools.js";
 import { registerReviewAgentProvider } from "./lib/review-agent.js";
 import { faqIndex, searchFaq } from "./lib/faq.js";
-import { createScriptToSourceSync, decideProposal } from "./lib/proposal-decision.js";
-import { createDesignRegistry, normalizeAbbr } from "./lib/designs.js";
-import { readSampleRecords, readStyleDefinition, writeStyleDefinition } from "./lib/design-style.js";
+import { applyConfirmedBatch, createScriptToSourceSync, decideProposal } from "./lib/proposal-decision.js";
+import { autolandBadge, latestAutoland, rollbackFirstDraft } from "./lib/first-draft.js";
+import { createDesignRegistry, normalizeAbbr, suggestAbbr } from "./lib/designs.js";
+import { appendSampleRecord, readSampleRecords, readStyleDefinition, writeStyleDefinition } from "./lib/design-style.js";
 import { resolveMediaFile, scanDesignStyles, scanResources } from "./lib/home-catalog.js";
 import { defaultSelection, renderModelPayload, resolveSelection } from "./lib/render-nodes.js";
 import { applyRenderSettings, readRenderSettings, renderSettingsPayload, saveRenderSettings } from "./lib/render-settings.js";
@@ -66,6 +67,8 @@ export const ROUTES = {
   sessionBind: "/api/deck-studio.session-bind",
   // F-108：工作台「确认落版 / 驳回」按钮——与 Agent 的 deck_revision_confirm 共用落版逻辑。
   proposalDecide: "/api/deck-studio.proposal-decide",
+  // F-173：首稿自动落版的回滚入口（工作台徽标旁的「回滚首稿」按钮）
+  draftRollback: "/api/deck-studio.draft-rollback",
   sessionBindings: "/api/deck-studio.session-bindings",
   handoff: "/api/deck-studio.handoff",
   sourcefile: "/api/deck-studio.sourcefile",
@@ -709,7 +712,7 @@ export function createService(config, logger, env = process.env) {
     }
   }
 
-  /** F-157：风格注册表为空时，自动导入插件自带的 8 个预设风格（含样张）。 */
+  /** F-157：风格注册表为空时，自动导入插件自带的 9 个预设风格（含样张）。 */
   function bootstrapDesignStyles() {
     try {
       if (designRegistry.listDesigns().length > 0) return;
@@ -1001,6 +1004,111 @@ export function createService(config, logger, env = process.env) {
       payload: { designId, abbr, name, canvasDeckId: canvas.deckId },
     });
     return { design: designProjectView(design), deckId: canvas.deckId };
+  }
+
+  /**
+   * F-186：把某个 deck 已出图页面的成品图复制成 design 样张（不重新出图、不花额度）。
+   * 默认挑 3 张（封面 / 信息页 / 数据页各一更好）——三张最能说明一套风格在封面、信息页、
+   * 对比/数据页上都成立，和预设风格的 3 张基线样张口径一致。
+   */
+  function copyDeckImagesAsSamples(design, { deckId, pages, max = 3 }) {
+    const adapter = adapterOf(deckId);
+    if (!adapter) throw new Error(`未知 deck：${deckId}`);
+    const dir = designStyleDir(design);
+    mkdirSync(dir, { recursive: true });
+    const deck = workspace.manifest(deckId) ?? workspace.ensureDeck(adapter, { styleBrief: config.styleBrief });
+    const requested = Array.isArray(pages) ? pages : [];
+    const pageIds = requested.length
+      ? requested.map((page) => `p${String(Number(String(page).replace(/^p/i, ""))).padStart(2, "0")}`)
+      : deck.slides.slice(0, max).map((slide) => slide.id);
+    const sourceImages = adapter.sourceImages?.() ?? {};
+    const samples = [];
+    for (const pageId of pageIds.slice(0, 6)) {
+      const info = slideRenderInfo(deckId, pageId);
+      if (!info) continue;
+      const sourcePath = info.fromSource
+        ? sourceImages[pageId]?.path
+        : join(workspace.slideDir(deckId, pageId), "versions", info.revision, `image${info.ext}`);
+      if (!sourcePath || !existsSync(sourcePath)) continue;
+      const ext = String(info.ext ?? "png").replace(/^\./, "");
+      let fileName = `sample-${pageId}-${info.revision}.${ext}`;
+      let n = 1;
+      while (existsSync(join(dir, fileName))) fileName = `sample-${pageId}-${info.revision}-${++n}.${ext}`;
+      writeFileSync(join(dir, fileName), readFileSync(sourcePath));
+      let prompt = "";
+      try {
+        prompt = readFileSync(join(workspace.slideDir(deckId, pageId), "versions", info.revision, "prompt.txt"), "utf8");
+      } catch {
+        prompt = "";
+      }
+      appendSampleRecord(dir, {
+        revision: info.revision,
+        brief: `从 ${deckId} ${pageId} 的成品图复制（登记风格用，未重新出图）`,
+        prompt,
+        imagePath: `designs/${design.abbr}/${fileName}`,
+        model: "",
+        size: "",
+      });
+      samples.push({ pageId, revision: info.revision, file: fileName, sizeBytes: statSync(join(dir, fileName)).size });
+    }
+    if (samples.length) {
+      store.recordEvent({
+        type: "design.sample.add",
+        deckId: design.canvasDeckId,
+        actor: "agent",
+        status: "succeeded",
+        payload: { designId: design.designId, abbr: design.abbr, fromDeck: deckId, samples: samples.map((item) => item.file) },
+      });
+    }
+    return samples;
+  }
+
+  /**
+   * F-186：普通对话里登记风格——没先选风格，deck 做出来后觉得这套视觉语言值得复用。
+   *
+   * 两种用法：
+   * - 不传 designId：新建 design（与 Designs 页「＋添加风格」同一份实体），缩写可自动生成；
+   * - 传 designId（或缩写）：只往已有风格里补样张，不动名称与提示词。
+   * 样张一律从 deck 已出图页面**复制成品图**，不重新出图、不花额度，登记下来和用户看到的一致。
+   */
+  function createStyleFromDeck(payload = {}) {
+    const deckId = String(payload.deckId ?? "").trim();
+    const existingKey = String(payload.designId ?? "").trim();
+    if (existingKey) {
+      const design = designRegistry.findDesign(existingKey) ?? designRegistry.findDesignByAbbr(existingKey);
+      if (!design) throw new Error(`未知 design：${existingKey}`);
+      if (!deckId) throw new Error("补样张要指定 deckId（从哪个 deck 复制成品图）");
+      const samples = copyDeckImagesAsSamples(design, { deckId, pages: payload.pages, max: 3 });
+      return {
+        designId: design.designId,
+        abbr: design.abbr,
+        name: design.name,
+        canvasDeckId: design.canvasDeckId,
+        samples,
+        appended: true,
+        totalSamples: readSampleRecords(designStyleDir(design)).length,
+      };
+    }
+    const name = String(payload.name ?? "").trim();
+    if (!name) throw new Error("风格名称不能为空");
+    const styleBrief = String(payload.styleBrief ?? "").trim();
+    if (!styleBrief) throw new Error("风格提示词不能为空：先写清这套风格的画面语言（颜色 / 材质 / 字体 / 版式）");
+    const description = String(payload.description ?? "").trim() || styleBrief;
+    const taken = designRegistry.listDesigns().map((item) => item.abbr);
+    const abbr = String(payload.abbr ?? "").trim() ? normalizeAbbr(payload.abbr) : suggestAbbr(name, taken);
+    if (designRegistry.findDesignByAbbr(abbr)) throw new Error(`缩写 ${abbr} 已被其他风格占用，换一个 abbr`);
+    const created = createDesign({
+      name,
+      abbr,
+      description,
+      styleBrief,
+      constraints: payload.constraints,
+      reference: payload.reference,
+    });
+    const design = designRegistry.findDesign(created.design.designId);
+    mkdirSync(designStyleDir(design), { recursive: true });
+    const samples = deckId ? copyDeckImagesAsSamples(design, { deckId, pages: payload.pages, max: 3 }) : [];
+    return { designId: design.designId, abbr: design.abbr, name: design.name, canvasDeckId: design.canvasDeckId, samples, appended: false };
   }
 
   /** 预设风格包里某个缩写的 styleBrief（老 design 迁移用；没有就 null）。 */
@@ -1300,26 +1408,23 @@ export function createService(config, logger, env = process.env) {
 
   /** script revision 列表（修改日志用：revisions/vNNN.md + 同名 note）。 */
   function deckRevisions(deckId) {
-    let dir;
     try {
-      dir = join(workspace.deckDir(deckId), "script", "revisions");
+      return workspace.listScriptRevisions(deckId).map((row) => {
+        const autoland = autolandOf(deckId, row.revision);
+        return { ...row, ...(autoland ? { autoland, autolandBadge: autolandBadge(autoland) } : {}) };
+      });
     } catch {
       return [];
     }
-    if (!existsSync(dir)) return [];
-    return readdirSync(dir)
-      .filter((name) => /^v\d+\.md$/.test(name))
-      .sort()
-      .reverse()
-      .map((name) => {
-        const revision = name.replace(/\.md$/, "");
-        const noteFile = join(dir, `${revision}.note.txt`);
-        return {
-          revision,
-          savedAt: statSync(join(dir, name)).mtime.toISOString(),
-          note: existsSync(noteFile) ? readFileSync(noteFile, "utf8").trim() : "",
-        };
-      });
+  }
+
+  function autolandOf(deckId, revision) {
+    try {
+      const raw = readFileSync(join(workspace.deckDir(deckId), "script", "revisions", `${revision}.autoland.json`), "utf8");
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
   }
 
   /** 9 份必备 deck 文档的治理状态（不含大段正文）。 */
@@ -1334,14 +1439,15 @@ export function createService(config, logger, env = process.env) {
   }
 
   /** 单份文档（中间区标签用）：正文 + 结构化视图。 */
-  function deckDoc(deckId, docId) {
+  /** F-187：`file` 指定同一份文档下的某个相关文件（如审稿页的 review.gap.md），不传就用默认正文。 */
+  function deckDoc(deckId, docId, file = "") {
     let deckDir;
     try {
       deckDir = workspace.deckDir(deckId);
     } catch {
       return null;
     }
-    return readDeckDoc({ adapter: adapterOf(deckId), deckDir, docId, render: config.render, revisions: deckRevisions(deckId), events: deckEvents(deckId) });
+    return readDeckDoc({ adapter: adapterOf(deckId), deckDir, docId, file, render: config.render, revisions: deckRevisions(deckId), events: deckEvents(deckId) });
   }
 
   /** 给缺失文档打骨架（只写 .deck 工作副本，不动源 deck）。 */
@@ -1731,6 +1837,12 @@ export function createService(config, logger, env = process.env) {
         // 已过期：工作副本变了，这条提案的 before 行不存在，确认会「工作副本已漂移」。
         stale: isStaleProposal(proposal),
         createdAt: proposal.createdAt,
+        // F-176 / I-18：评审意见清单要靠这些字段分组和判断能否勾选（C 类不可选）。
+        status: proposal.status,
+        reviewRef: proposal.reviewRef ?? null,
+        severity: proposal.severity ?? null,
+        confidence: proposal.confidence ?? null,
+        evidence: typeof proposal.evidence === "string" ? proposal.evidence.slice(0, 300) : null,
       })),
       generatedAt: new Date().toISOString(),
     };
@@ -2002,7 +2114,7 @@ export function createService(config, logger, env = process.env) {
     bootstrapDesignStyles();
   }
 
-  return { config, store, workspace, adapters, status, state, workbench, readManual, readUserName: () => config.userName, saveUserName, readDoc, docsAsset, setDeckDensity, renderSettings, saveRenderConfig, isLocalDeck: (deckId) => localDeckIds().has(String(deckId ?? "")), assetFile, slideRenderInfo, deckCoverUrl, deckRevisions, deckDocs, deckDoc, deckDocsScaffold, deckDocFile, pageForEdit, savePage, exportDeckFile, designSamples, sourceFile, homeCatalog, mediaFile, renderState, setRenderSelection, renderRuntime, createDeck, createDesign, designProjects, designStyle, updateDesignStyle, backfillStyleBriefs, listBindings, bindSession, unbindSession, deleteDesign, deleteDeck, setDeckDesign, addDesignSamples, seedStyleDesigns, renderStatus, exportHandoff }
+  return { config, store, workspace, adapters, status, state, workbench, readManual, readUserName: () => config.userName, saveUserName, readDoc, docsAsset, setDeckDensity, renderSettings, saveRenderConfig, isLocalDeck: (deckId) => localDeckIds().has(String(deckId ?? "")), assetFile, slideRenderInfo, deckCoverUrl, deckRevisions, deckDocs, deckDoc, deckDocsScaffold, deckDocFile, pageForEdit, savePage, exportDeckFile, designSamples, sourceFile, homeCatalog, mediaFile, renderState, setRenderSelection, renderRuntime, createDeck, createDesign, createStyleFromDeck, designProjects, designStyle, updateDesignStyle, backfillStyleBriefs, listBindings, bindSession, unbindSession, deleteDesign, deleteDeck, setDeckDesign, addDesignSamples, seedStyleDesigns, renderStatus, exportHandoff }
 }
 
 /**
@@ -2198,6 +2310,18 @@ export function apply(ctx, rawConfig) {
       const quote = String(body?.quote ?? "").trim()
         || (confirmed ? "（工作台：用户点了「确认落版」）" : "（工作台：用户点了「驳回」）");
       const syncScriptToSource = createScriptToSourceSync({ adapters: service.adapters, isLocalDeck: (deckId) => service.isLocalDeck(deckId) });
+      // F-176 / I-18：「接受并更新」——勾选的一批评审修改合成**一条** revision（不是一条提案一条 revision）。
+      if (confirmed && body?.batch === true) {
+        const proposals = ids.map((proposalId) => service.workspace.proposal(proposalId)).filter(Boolean);
+        const missing = ids.filter((proposalId) => !proposals.some((proposal) => proposal.proposalId === proposalId));
+        if (missing.length) return json({ ok: false, error: { message: `提案不存在：${missing.join("、")}`, missing } }, 404);
+        try {
+          const landed = applyConfirmedBatch({ store: service.store, workspace: service.workspace, proposals, quote, sessionId: null, syncScriptToSource });
+          return json({ ok: true, batch: true, revision: landed.revision, reviewRefs: landed.reviewRefs, decided: proposals.length, sourceSync: landed.sourceSync ?? null });
+        } catch (error) {
+          return json({ ok: false, error: { message: String(error?.message ?? error) } }, 409);
+        }
+      }
       const results = [];
       for (const proposalId of ids) {
         const proposal = service.workspace.proposal(proposalId);
@@ -2213,6 +2337,31 @@ export function apply(ctx, rawConfig) {
         }
       }
       return json({ ok: true, results, decided: results.filter((item) => item.ok).length });
+    },
+    ["POST"],
+  );
+
+  // F-173：工作台「回滚首稿」——与 Agent 的 deck_draft_rollback 同一条逻辑。
+  registerRoute(
+    ROUTES.draftRollback,
+    async (request) => {
+      if ((request?.method ?? "POST").toUpperCase() !== "POST") return json({ ok: false, error: { message: "POST only" } }, 405);
+      const body = await request.json().catch(() => ({}));
+      const deckId = String(body?.deckId ?? "").trim();
+      if (!deckId) return json({ ok: false, error: { message: "缺少 deckId" } }, 400);
+      if (!service.workspace.manifest(deckId)) return json({ ok: false, error: { message: `未知 deck：${deckId}` } }, 404);
+      const latest = latestAutoland(service.workspace, deckId);
+      if (!latest) return json({ ok: false, error: { message: "没有可回滚的首稿：最新 revision 不是自动落版（或已回滚过）" } }, 409);
+      try {
+        const result = rollbackFirstDraft({ workspace: service.workspace, deckId, note: String(body?.note ?? "（工作台：用户点了「回滚首稿」）") });
+        const text = service.workspace.scriptCurrent(deckId) ?? "";
+        const syncScriptToSource = createScriptToSourceSync({ adapters: service.adapters, isLocalDeck: (id) => service.isLocalDeck(id) });
+        const sourceSync = syncScriptToSource ? syncScriptToSource(deckId, text, null) : null;
+        service.store.recordEvent({ type: "deck.edit", sessionId: null, taskId: null, deckId, slideIds: [], actor: "user", status: "succeeded", payload: { outcome: "autoland-rollback", fromRevision: result.beforeRevision, revision: result.revision } });
+        return json({ ok: true, ...result, ...(sourceSync ? { sourceSync } : {}) });
+      } catch (error) {
+        return json({ ok: false, error: { message: String(error?.message ?? error) } }, 409);
+      }
     },
     ["POST"],
   );
@@ -2286,8 +2435,10 @@ export function apply(ctx, rawConfig) {
     const deckId = url.searchParams.get("deckId") ?? "";
     const docId = url.searchParams.get("docId") ?? "";
     // F-163：读取失败要把真实原因吐给前端，不能 500 空手而归（前端以前会一直转圈）。
+    // F-187：审稿页的「相关文件」（review.readers.md / review.gap.md / review.experts.md …）可逐个打开。
+    const file = url.searchParams.get("file") ?? "";
     try {
-      const doc = service.deckDoc(deckId, docId);
+      const doc = service.deckDoc(deckId, docId, file);
       if (!doc) return json({ ok: false, error: { message: `unknown deck or doc：deckId=${deckId || "(空)"} docId=${docId || "(空)"}` } }, 404);
       return json({ ok: true, deckId, ...doc });
     } catch (error) {
@@ -2334,7 +2485,7 @@ export function apply(ctx, rawConfig) {
     if (!toolRuntime?.register) {
       ctx.logger?.warn?.(`${name}: config.tools=true 但 tools 服务不可用——deck 工具未注册`);
     } else {
-      const tools = defineDeckTools({ store: service.store, workspace: service.workspace, adapters: service.adapters, config, env: process.env, repoRoot: repoRootFrom(PLUGIN_DIR), isLocalDeck: (deckId) => service.isLocalDeck(deckId), resolveRender: (deckId) => service.renderRuntime(deckId), subagents: () => ctx.get("subagents") ?? null });
+      const tools = defineDeckTools({ store: service.store, workspace: service.workspace, adapters: service.adapters, config, env: process.env, repoRoot: repoRootFrom(PLUGIN_DIR), isLocalDeck: (deckId) => service.isLocalDeck(deckId), resolveRender: (deckId) => service.renderRuntime(deckId), createStyle: (payload) => service.createStyleFromDeck(payload), subagents: () => ctx.get("subagents") ?? null });
       for (const tool of tools) {
         disposers.push(toolRuntime.register(tool));
       }

@@ -8,7 +8,7 @@
  * @module dsh-plugin-deck-studio/deck-workspace
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { createLocalSourceAdapter } from "./source-adapter.js";
@@ -56,6 +56,12 @@ export const SECTION_FIELD_KEYS = {
   // F-109：正文独立成字段。以前 claim 把「正文」当别名，提案会整段覆盖正文，
   // 现在 body 走自己的字段，claim 不再误伤正文。
   body: ["正文"],
+  // F-181（I-06）：逐页契约 5 项里的可写字段；缺字段时插在标题行之后，老 deck 不受影响。
+  // 键名用中文字段名（工具 enum 直接暴露给人看），英文别名保留给内部调用。
+  角色: ["角色"],
+  受众变化: ["受众变化", "听众变化"],
+  关系: ["关系"],
+  证据: ["证据"],
 };
 
 /** 标题行（`### P04 · …`）与该页结束行（下一个 heading 之前）。 */
@@ -393,6 +399,25 @@ export function createDeckWorkspace(config) {
     return { revision, path: file };
   }
 
+  /** 已落版 script revision 列表（新的在前）；首稿判定与回滚共用。 */
+  function listScriptRevisions(deckId) {
+    const dir = join(deckDir(deckId), "script", "revisions");
+    if (!existsSync(dir)) return [];
+    return readdirSync(dir)
+      .filter((name) => /^v\d+\.md$/.test(name))
+      .sort()
+      .reverse()
+      .map((name) => {
+        const revision = name.replace(/\.md$/, "");
+        const noteFile = join(dir, `${revision}.note.txt`);
+        return {
+          revision,
+          savedAt: statSync(join(dir, name)).mtime.toISOString(),
+          note: existsSync(noteFile) ? readFileSync(noteFile, "utf8").trim() : "",
+        };
+      });
+  }
+
   /** 提案。 */
   function saveProposal(proposal) {
     const dir = join(deckDir(proposal.deckId), "proposals");
@@ -460,6 +485,7 @@ export function createDeckWorkspace(config) {
     appendScriptPages,
     scriptPageNumbers,
     saveScriptRevision,
+    listScriptRevisions,
     saveProposal,
     proposal,
     updateProposal,

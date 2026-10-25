@@ -147,7 +147,7 @@ To add samples to an existing style: click the **eye** icon on the style card �
 bottom of the preview. You can also drop images into `designs/<ABBR>/` directly
 (see [docs/install.md](docs/install.md) §5, Chinese).
 
-### 8 preset styles (shipped with the plugin)
+### 9 preset styles (shipped with the plugin)
 
 **＋ Import preset styles** on the Designs page imports them in one click (idempotent; existing abbreviations
 are skipped):
@@ -162,6 +162,7 @@ are skipped):
 | SKT | Hand-drawn whiteboard (workshop) | Workshops / co-creation / training |
 | SWS | Swiss minimal (black/white/red) | Minimal manifestos / big type |
 | GRD | Aurora gradient (modern SaaS) | Product launches / internet style |
+| DSA | Deep Sea Amber (deep teal + champagne gold hairlines) | Premium talks / dark narrative / serif headlines |
 
 Each preset ships with 3 real baseline samples (cover / info page / data page, under
 `plugin/deck-studio/seeds/samples/`); style definitions live in `plugin/deck-studio/seeds/styles/*.json`.

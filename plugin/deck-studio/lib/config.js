@@ -55,6 +55,19 @@ export const DEFAULT_RENDER = {
   default: "",
 };
 
+/**
+ * 图片评审（F-178 / 智力升级 C 层）用的视觉模型通道：OpenAI 兼容 chat/completions。
+ * 默认全空——**仓库不携带节点地址 / 模型名 / key**；用 profile 的 deckStudio.imageReview 或 env 配。
+ */
+export const DEFAULT_IMAGE_REVIEW = {
+  baseURL: "",
+  model: "",
+  apiKeyEnv: "WOCHENG_API_KEY",
+  apiKeyFile: "",
+  timeoutMs: 180_000,
+  maxTokens: 3000,
+};
+
 /** 默认视觉 preset（写进每页 prompt 头部；可在 profile 里用 styleBrief 覆盖）。 */
 export const DEFAULT_STYLE_BRIEF =
   "品牌信息图风格：深青 #06363B 主色、米白纸张底、暖金点缀，纸张纹理背景；" +
@@ -124,6 +137,18 @@ export function mergeConfig(raw, options = {}) {
     timeoutMs: positive(renderInput.timeoutMs, DEFAULT_RENDER.timeoutMs),
   };
 
+  const reviewInput = input.imageReview && typeof input.imageReview === "object" ? input.imageReview : {};
+  const imageReview = {
+    ...DEFAULT_IMAGE_REVIEW,
+    ...reviewInput,
+    baseURL: reviewInput.baseURL || env.DSH_DECK_VISION_BASE_URL || DEFAULT_IMAGE_REVIEW.baseURL,
+    model: reviewInput.model || env.DSH_DECK_VISION_MODEL || DEFAULT_IMAGE_REVIEW.model,
+    apiKeyEnv: reviewInput.apiKeyEnv || env.DSH_DECK_VISION_API_KEY_ENV || DEFAULT_IMAGE_REVIEW.apiKeyEnv,
+    apiKeyFile: expandHome(reviewInput.apiKeyFile || env.DSH_DECK_VISION_API_KEY_FILE || DEFAULT_IMAGE_REVIEW.apiKeyFile, env),
+    timeoutMs: positive(reviewInput.timeoutMs, DEFAULT_IMAGE_REVIEW.timeoutMs),
+    maxTokens: positive(reviewInput.maxTokens, DEFAULT_IMAGE_REVIEW.maxTokens),
+  };
+
   const decksRaw = Array.isArray(input.decks) ? input.decks : [];
   const decks = decksRaw.map((deck) => normalizeDeck(deck, env)).filter(Boolean);
 
@@ -140,6 +165,8 @@ export function mergeConfig(raw, options = {}) {
   }
 
   return {
+    /** 图片评审的视觉模型通道（F-178）；默认空，靠 profile / env 配。 */
+    imageReview,
     /** 只在 preset 子树挂载点为 true；根挂载只开路由与面板。 */
     tools: input.tools === true,
     /** preset 子树挂载点设 false（根挂载已注册同路径路由，避免双重注册）。 */

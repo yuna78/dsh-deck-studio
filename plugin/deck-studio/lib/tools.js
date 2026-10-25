@@ -9,23 +9,48 @@
 
 import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
-import { buildPrompt, qaCheck, nextRevision, selectRenderer, editEndpointFor, imageMime, createFakeEditRenderer, createRealEditRenderer } from "./render.js";
+import { buildPrompt, qaCheck, nextRevision, selectRenderer, editEndpointFor, imageMime, readKeyFromFile, createFakeEditRenderer, createRealEditRenderer } from "./render.js";
 import { applyScriptFieldEdit, scriptDiff, newProposalId, proposalNow, SCRIPT_FIELD_CELL, scriptSectionRange } from "./deck-workspace.js";
 import { appendChangelogNote, readDeckDoc, resolveDeckDocs, scaffoldDeckDocs } from "./deck-docs.js";
 import { createDesignRegistry } from "./designs.js";
 import { appendSampleRecord, composeSamplePrompt, readSampleRecords, readStyleDefinition, writeStyleDefinition } from "./design-style.js";
 import { createLocalSourceAdapter, parseSectionedPages } from "./source-adapter.js";
 import { readDeckRules, renderDeckRules } from "./deck-rules.js";
-import { readDeckBrief } from "./deck-brief.js";
+import { readDeckBrief, validateSkeleton } from "./deck-brief.js";
 import { scriptStyleHints } from "./script-style.js";
-import { DEFAULT_MAX_REVIEWERS, HARD_MAX_REVIEWERS, deriveReviewers, mergeIssues, parseReviewerOutput, renderReviewMarkdown, reviewerPrompt } from "./review-personas.js";
+import { DEFAULT_MAX_REVIEWERS, HARD_MAX_REVIEWERS, deriveReviewers, mergeIssues } from "./review-personas.js";
+import {
+  BLIND_FREEZE_FILE,
+  REVIEW_REPORT_FILE,
+  blindReviewerPrompt,
+  buildFindings,
+  contrastReviewerPrompt,
+  gapsToIssues,
+  makeFreezeRecord,
+  mergeBlind,
+  pageIdsFromScript,
+  parseBlindOutput,
+  parseContrastOutput,
+  renderProtocolMarkdown,
+  scriptContainsEvidence,
+  scriptSnapshotHash,
+  verifyFreeze,
+} from "./review-protocol.js";
 import { REVIEW_AGENT_PROVIDER } from "./review-agent.js";
+import { plainReviewSummary, renderGapReviewMarkdown, renderReaderReviewMarkdown } from "./review-readers.js";
+import { applyCitationChecks, citationCheckPrompt, parseCitationCheck } from "./citation-check.js";
+import { attemptsOf, pickRenderExpectations, renderImageReviewMarkdown, runImageReview } from "./image-review.js";
+import { analyzeTitleChain, renderTitleChain } from "./title-chain.js";
+import { CONTRACT_FIELD_KEYS, contractTag, readPageContract, summarizeContracts, validatePageContract } from "./page-contract.js";
+import { compareScores, mergeScoreRecords, parseScoreOutput, renderScoreHistoryMarkdown, renderScoreSummary, scoreHistoryEntry, scoreReviewerPrompt } from "./review-score.js";
+import { analyzeFactLabels, factSummaryLine } from "./fact-labels.js";
 import { densityLine } from "./content-density.js";
 import { faqIndex, searchFaq } from "./faq.js";
 import { WATERMARK_POSITIONS, WATERMARK_POSITION_LABELS, findAsset, listAssets, positionLine, readPngFile, watermarkPng } from "./watermark.js";
 import { PLUGIN_DIR, repoRootFrom } from "./config.js";
 import { buildIntentMarkdown } from "./deck-templates.js";
-import { createScriptToSourceSync, decideProposal } from "./proposal-decision.js";
+import { applyFirstDraftBatch, createScriptToSourceSync, decideProposal } from "./proposal-decision.js";
+import { isFirstDraft, latestAutoland, rollbackFirstDraft } from "./first-draft.js";
 
 /** 本次调用的 sessionId（非 agent 环境——冒烟测试——为 null）。 */
 function sessionIdOf(exec) {
@@ -139,7 +164,33 @@ const strEnum = (values) => ({ type: "string", enum: values });
  * @param {import('./config.js').mergeConfig} services.config
  * @param {NodeJS.ProcessEnv} [services.env]
  */
-export function defineDeckTools({ store, workspace, adapters, config, env = process.env, resolveRender = null, isLocalDeck = null, repoRoot = null, subagents = null }) {
+/**
+ * 评审意见 → 提案的元数据（F-176 / 智力升级 I-18）。
+ * A/B 类可以进提案；C 类（原文找不到证据）一律拒绝——宁可少一条意见，也不让编造的证据进改动。
+ */
+function reviewMetaOf(args = {}) {
+  const meta = {};
+  const reviewRef = String(args.reviewRef ?? "").trim();
+  if (reviewRef) meta.reviewRef = reviewRef.slice(0, 40);
+  const severity = String(args.severity ?? "").trim().toUpperCase();
+  if (severity) {
+    if (!["P0", "P1", "P2"].includes(severity)) throw new Error(`severity 只能是 P0 / P1 / P2（收到 ${severity}）`);
+    meta.severity = severity;
+  }
+  const confidence = String(args.confidence ?? "").trim().toUpperCase();
+  if (confidence) {
+    if (!["A", "B", "C", "D"].includes(confidence)) throw new Error(`confidence 只能是 A / B / C / D（收到 ${confidence}）`);
+    if (confidence === "C") {
+      throw new Error("C 类意见（稿件里找不到原文证据）不许进提案：先在评审里确认证据，或把它当「无法核实」告诉用户，不要照着改。");
+    }
+    meta.confidence = confidence;
+  }
+  const evidence = String(args.evidence ?? "").trim();
+  if (evidence) meta.evidence = evidence.slice(0, 300);
+  return meta;
+}
+
+export function defineDeckTools({ store, workspace, adapters, config, env = process.env, resolveRender = null, isLocalDeck = null, repoRoot = null, subagents = null, visionFetch = null, createStyle = null }) {
   const resolveSubagents = () => (typeof subagents === "function" ? subagents() : subagents);
   const designs = createDesignRegistry({ dataRoot: config.dataRoot });
   const decksRegistryFile = join(config.dataRoot, "decks-registry.json");
@@ -300,6 +351,11 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
         const density = workspace.manifest(adapter.id)?.contentDensity ?? "auto";
         // F-158：写 script 前先看到 intent 的听众 / 目的（新 deck 的 deb 规则里也会带，但 overview 是第一个调用）。
         const brief = adapter.available() ? readDeckBrief(adapter.sourceRoot) : {};
+        // F-180 / I-05：deck 级论证骨架（核心论证 / 骨架类型 / 页序角色）——没写就提示先写骨架再列页。
+        const skeleton = validateSkeleton(brief);
+        const skeletonState = brief.skeleton?.argument || brief.skeleton?.type || brief.skeleton?.order
+          ? { argument: brief.skeleton.argument, type: brief.skeleton.type, order: brief.skeleton.order, keepThree: brief.skeleton.keepThree, ok: skeleton.ok, missing: skeleton.missing }
+          : { ok: false, missing: skeleton.missing.length ? skeleton.missing : ["核心论证", "骨架类型", "页序角色"] };
         return {
           deckId: adapter.id,
           label: adapter.label,
@@ -321,13 +377,17 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
             ...(rules.warning ? { warning: rules.warning } : {}),
           },
           _rulesText: renderDeckRules(rules),
-          _briefText: brief.audience || brief.takeaway || brief.success
-            ? `受众 / 目的：${[brief.audience, brief.takeaway || brief.success].filter(Boolean).join(" · ")}`
-            : "",
+          _briefText: [
+            brief.audience || brief.takeaway || brief.success
+              ? `受众 / 目的：${[brief.audience, brief.takeaway || brief.success].filter(Boolean).join(" · ")}`
+              : "",
+            skeleton.hint,
+          ].filter(Boolean).join("\n"),
+          _skeletonText: skeletonState,
         };
       });
       return {
-        decks: decks.map(({ _rulesText, _briefText, ...deck }) => deck),
+        decks: decks.map(({ _rulesText, _briefText, _skeletonText, ...deck }) => deck),
         deckId: null,
         text: decks
           .map((deck) =>
@@ -442,6 +502,11 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
     "目标": "成功标准", goal: "成功标准", objective: "成功标准",
     "不讲的": "不讲的", "不讲": "不讲的", scopeOut: "不讲的", scope: "不讲的",
     "边界": "不讲的", "排除": "不讲的", "不包括": "不讲的", "nonGoals": "不讲的",
+    // F-180（I-05）：论证骨架四行也是 intent 的结构化字段，能通过 deck_doc_update 写。
+    "核心论证": "核心论证", argument: "核心论证", "论点": "核心论证",
+    "骨架类型": "骨架类型", skeletonType: "骨架类型", "叙事结构类型": "骨架类型",
+    "页序角色": "页序角色", pageOrder: "页序角色", "页序": "页序角色",
+    "只留 3 页留哪 3 页": "只留 3 页留哪 3 页", "只留3页": "只留 3 页留哪 3 页", keepThree: "只留 3 页留哪 3 页",
   };
   const DOC_DRAFT_PATH = (dir, docId) => (docId === "research" ? join(dir, "docs", "research", "index.md") : join(dir, "docs", `${docId}.md`));
   const DOC_TITLES = { materials: "支撑材料", research: "调研", feedback: "反馈" };
@@ -509,7 +574,7 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
           if (!value) continue;
           merged.push([fieldName, value]);
         }
-        if (!merged.length && !storyline) throw new Error("intent 至少要给一个字段（听众 / 主题 / 带走 / 场合·时长 / 成功标准 / 不讲的）或故事线正文");
+        if (!merged.length && !storyline) throw new Error("intent 至少要给一个字段（听众 / 主题 / 带走 / 场合·时长 / 成功标准 / 不讲的 / 核心论证 / 骨架类型 / 页序角色 / 只留 3 页）或故事线正文");
         const lines = current.split("\n");
         const lineRe = /^(\s*-\s*\*\*)([^*]+)(\*\*\s*[：:]\s*)(.*)$/;
         let lastFieldIndex = -1;
@@ -637,12 +702,37 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
         return Boolean(proposal.before) && !text.includes(proposal.before);
       };
       const briefOf = (slide) => String(slide.visualBrief ?? "").trim();
+      // F-181：逐页契约（角色 / 受众变化 / 关系 / 主张 / 证据）在 script 的 `**字段**：值` 行里；
+      // 老 deck 没有 → 只显示「未填」，不报错、不阻断出图。
+      const parsedForContract = parseSectionedPages(currentScript);
+      const fieldsOfPage = new Map(parsedForContract.map((page) => [page.page, page.fields ?? {}]));
+      const contractOfSlide = (slide) => validatePageContract(fieldsOfPage.get(slide.order) ?? {});
       const lines = slides.map((slide) => {
         const brief = briefOf(slide);
         const briefStyle = slide.visualBriefDesign ? `（写于 ${slide.visualBriefDesign} 风格）` : "（未记录写作风格）";
         const briefText = brief ? `${briefStyle}${brief.slice(0, 120)}${brief.length > 120 ? "…" : ""}` : "（空 · 这一页还不能出图）";
-        return `P${String(slide.order).padStart(2, "0")} [${slide.id}] ${slide.title}\n    回答：${slide.question || "—"}\n    主张：${slide.claim || "—"}\n    画面要求：${briefText}\n    来源：${slide.source || "—"}`;
+        const contract = contractOfSlide(slide);
+        return `P${String(slide.order).padStart(2, "0")} [${slide.id}] ${slide.title}\n    回答：${slide.question || "—"}\n    主张：${slide.claim || "—"}\n    契约：${contractTag(contract)}\n    画面要求：${briefText}\n    来源：${slide.source || "—"}`;
       });
+      // F-181：整本契约汇总（一页都没填时只提示一句，不刷屏）。
+      const contractSummary = summarizeContracts(parsedForContract);
+      const missingContractPages = contractSummary.perPage.filter((item) => !item.ok);
+      const contractLine = contractSummary.untouched
+        ? "逐页契约：这本 deck 还没填（老 deck 正常）——新写页时建议每页补 角色 / 受众变化 / 关系 / 证据。"
+        : contractSummary.complete === contractSummary.pages
+          ? ""
+          : `逐页契约：${contractSummary.pages} 页里 ${contractSummary.complete} 页齐；缺的页：${missingContractPages.slice(0, 5).map((item) => `P${String(item.page).padStart(2, "0")}（${item.missing.join("、") || "有弱项"}）`).join("；")}${missingContractPages.length > 5 ? ` …等 ${missingContractPages.length} 页` : ""}`;
+      // F-182（I-07）：正文里的数字要么挂事实 ID、要么标「示意数据」；没标注只提示，不阻断。
+      const factAnalysis = analyzeFactLabels(
+        parsedForContract.map((page) => ({
+          page: page.page,
+          // 正文取 script 现场内容（manifest 的 body 只在提案落版时同步，读稿要按 script 判事实）。
+          body: page.fields?.["正文"] || page.content || "",
+          claim: page.fields?.["主张"] || page.claim || "",
+          evidence: readPageContract(page.fields ?? {}).证据,
+        })),
+      );
+      const factLine = factSummaryLine(factAnalysis);
       const linked = linkedDesignStyle(deck.id);
       const styleLine = linked
         ? `\n关联风格：${linked.abbr} ${linked.name}（出图时自动带上它的 styleBrief；visualBrief 只写这页具体画面，不要另起一套视觉语言）\n  styleBrief：${linked.brief.slice(0, 200)}${linked.brief.length > 200 ? "…" : ""}${linked.constraints ? `\n  不要什么：${linked.constraints}` : ""}`
@@ -651,10 +741,15 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
       const densityLineText = densityLine(deck.contentDensity);
       // F-158：写 script 前把 intent 的听众 / 目的和文案纪律一起读给 Agent，不然它会按「通用文案」写。
       const brief = readDeckBrief(adapter.sourceRoot);
+      const skeleton = validateSkeleton(brief);
+      const skeletonLine = brief.skeleton?.argument || brief.skeleton?.type || brief.skeleton?.order
+        ? `论证骨架：${[brief.skeleton.argument, brief.skeleton.type, brief.skeleton.order].filter(Boolean).join(" ｜ ")}${brief.skeleton.keepThree ? `\n只留 3 页：${brief.skeleton.keepThree}` : ""}${skeleton.hint ? `\n⚠ ${skeleton.hint}` : ""}`
+        : `⚠ ${skeleton.hint || "论证骨架还没写"}`;
       const briefLine = [
         brief.audience ? `听众：${brief.audience}（术语密度 / 例子 / 取舍按这个来）` : "听众：intent 里没写——先问用户，或按最小假设写明再写正文",
         brief.takeaway || brief.success ? `目的 / 成功标准：${brief.takeaway || brief.success}` : "",
         "文案纪律：标题≤16 字给判断（比喻 / 对仗 / 问句 / 「不是…而是…」都不要）；副标题一句话说这页回答什么；正文先结论后证据，按听众调术语密度；不写 AI 黑话（赋能 / 闭环 / 抓手 / 生态位 / 底层逻辑 / 范式）。",
+        skeletonLine,
       ].filter(Boolean).join("\n");
       const pendingText = pending.length
         ? pending.map((proposal) => `  ${proposal.proposalId} · ${proposal.pageId} · ${proposal.field}${staleOf(proposal) ? " · 已过期（工作副本已变，需重新提案）" : ""}`).join("\n")
@@ -683,7 +778,7 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
         count: slides.length,
         slideIds: slides.map((slide) => slide.id),
         pendingProposals: pending.map((proposal) => ({ proposalId: proposal.proposalId, pageId: proposal.pageId, field: proposal.field, stale: staleOf(proposal) })),
-        text: `deck ${deck.id}（${deck.title}）· 正文 ${slides.length} 页${styleLine}\n${densityLineText}\n${briefLine}${syncLine}${longClaimLine}\n${lines.join("\n")}${appendixText}\n待确认提案（${pending.length}）：\n${pendingText}\n（源：${adapter.sourceRoot} · 只读）`,
+        text: `deck ${deck.id}（${deck.title}）· 正文 ${slides.length} 页${styleLine}\n${densityLineText}\n${briefLine}${contractLine ? `\n${contractLine}` : ""}${factLine ? `\n${factLine}` : ""}${syncLine}${longClaimLine}\n${lines.join("\n")}${appendixText}\n待确认提案（${pending.length}）：\n${pendingText}\n（源：${adapter.sourceRoot} · 只读）`,
         outOfSyncPages: outOfSync.map((slide) => slide.id),
       };
     }),
@@ -694,7 +789,7 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
     name: "deck_script_propose_edit",
     description:
       "提出一页的修改提案：生成 unified diff 并进入 waiting-user，等用户在 Chat 里确认（或在工作台点确认）。" +
-      "可改字段：title（标题）/ question（这页回答）/ body（正文，整页 3-5 句）/ claim（一句话判断，老 deck 兼容）/ visualBrief（画面要求，仅 manifest）。" +
+      "可改字段：title（标题）/ question（这页回答）/ body（正文，整页 3-5 句）/ claim（一句话判断，老 deck 兼容）/ visualBrief（画面要求，仅 manifest）；逐页契约另可用 角色 / 受众变化 / 关系 / 证据 四个字段（script 里的 `**角色**：…` 行，缺行时自动插在标题后）。" +
       "写整页内容时 title+question+body 一起提；多页 / 整本重写用 deck_script_propose_edits 一次提交；" +
       "严禁在用户确认前调用 deck_revision_confirm。",
     parameters: {
@@ -702,9 +797,13 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
       properties: {
         deckId: { type: "string" },
         page: { type: "number", description: "页号（script 里的 N）" },
-        field: strEnum([...Object.keys(SCRIPT_FIELD_CELL), "body", "visualBrief"]),
+        field: strEnum([...Object.keys(SCRIPT_FIELD_CELL), ...CONTRACT_FIELD_KEYS, "body", "visualBrief"]),
         newValue: { type: "string", description: "新值全文（不是增量）" },
         reason: { type: "string", description: "为什么改（写进 trace）" },
+        reviewRef: { type: "string", description: "这条改动对应评审清单里的哪一条（如 R03；修订确认用）" },
+        severity: { type: "string", description: "评审严重度 P0 / P1 / P2" },
+        confidence: { type: "string", description: "证据置信度 A / B / C / D；C（原文找不到）不许提" },
+        evidence: { type: "string", description: "评审给的原文证据（逐字，≥8 字）" },
       },
       required: ["deckId", "page", "field", "newValue"],
       additionalProperties: false,
@@ -765,6 +864,7 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
         value: String(args.newValue ?? "").trim(),
         diff,
         reason: String(args.reason ?? ""),
+        ...reviewMetaOf(args),
         status: "waiting-user",
         createdAt: proposalNow(),
         sessionId: sessionIdOf(exec),
@@ -993,6 +1093,56 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
     }),
   });
 
+
+  // ── 4.5 deck_draft_rollback（F-173 首稿自动落版的安全阀）──────────────────
+  tools.push({
+    name: "deck_draft_rollback",
+    description:
+      "回滚首稿：把稿子恢复到「首稿自动落版之前」的内容（追加一条新 revision，旧版全部保留）。" +
+      "只在这份 deck 的最新 revision 是自动落版时可用；正式修订（用户确认过的版本）不适用，走提案流程。" +
+      "用户说「这首稿不要了 / 回到之前 / 重新起草」时用它，然后报告回到了哪一版。",
+    parameters: {
+      type: "object",
+      properties: {
+        deckId: { type: "string" },
+        note: { type: "string", description: "回滚原因（记进 revision 说明与事件，可选）" },
+      },
+      required: ["deckId"],
+      additionalProperties: false,
+    },
+    output: { schema: { type: "object", properties: { deckId: { type: "string" }, revision: { type: "string" } } }, render: (_args, value) => [{ type: "text", text: String(value?.text ?? "") }] },
+    execute: withToolEvent(store, "deck_draft_rollback", async (args, exec) => {
+      const deckId = String(args.deckId ?? "").trim();
+      if (!deckId) throw new Error("缺少 deckId");
+      const deck = workspace.manifest(deckId);
+      if (!deck) throw new Error(`未知 deck：${deckId}`);
+      const latest = latestAutoland(workspace, deckId);
+      if (!latest) throw new Error(`没有可回滚的首稿：${deckId} 最新 revision 不是自动落版（或已经回滚过）。正式修订请走提案流程。`);
+      const result = rollbackFirstDraft({ workspace, deckId, note: String(args.note ?? "") });
+      const current = workspace.scriptCurrent(deckId) ?? "";
+      const sourceSync = typeof syncScriptToSource === "function" ? syncScriptToSource(deckId, current, null) : null;
+      store.recordEvent({
+        type: "deck.edit",
+        sessionId: sessionIdOf(exec),
+        taskId: null,
+        deckId,
+        slideIds: [],
+        actor: "user",
+        status: "succeeded",
+        payload: { outcome: "autoland-rollback", fromRevision: result.beforeRevision, revision: result.revision, note: String(args.note ?? "") },
+      });
+      return {
+        deckId,
+        revision: result.revision,
+        beforeRevision: result.beforeRevision,
+        ...(sourceSync ? { sourceSync } : {}),
+        text:
+          `首稿已回滚：${result.beforeRevision} 的自动落版作废，稿子恢复到落版前内容，新 revision ${result.revision}（旧版都保留，可再回看）。` +
+          `${sourceSync ? (sourceSync.ok ? "源 script.md 已回写并提交。" : `源 script.md 已回写，git 未提交：${sourceSync.error}。`) : ""}` +
+          `\n接下来按用户要的方向重新起草；重新落版时仍走首稿自动落版（此时又回到「没有已落版稿子」的状态）。`,
+      };
+    }),
+  });
 
   // ── 5. deck_render_page ────────────────────────────────────────────────────
   tools.push({
@@ -1594,6 +1744,97 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
     }),
   });
 
+  /**
+   * F-186：普通 deck 会话里的「风格登记」——没先选风格，deck 做完后把这套视觉语言沉淀成 design。
+   * 与 Designs 页「＋添加风格」同一个创建路径（同一份样式卡 / 画布 / 注册表），
+   * 区别：缩写可省略（自动生成），并可直接把当前 deck 已出图的页面复制成样张（不重新出图、不花额度）。
+   */
+  tools.push({
+    name: "deck_style_create",
+    description:
+      "把一套视觉语言登记成风格（design）：给名称 + 风格提示词（画面语言），并传当前 deck 的已出图页面当样张（直接复制成品图，不重新出图）。" +
+      "默认挑 3 张（有封面 / 信息页 / 数据对比页最好，三张才能说明风格在各类版面上都成立）；" +
+      "用在普通 deck 会话里：用户没先选风格、或做完后说「这个风格好看 / 帮我登记 / 以后想复用」时调它；" +
+      "不要回答「没有接口 / 只能去界面建」。登记后用户可在新建 deck 时选这个风格，也可以用 deck_design_bind 把它关联到当前 deck。" +
+      "给已有风格补样张：传 designId（或缩写）+ deckId + pages，不传 name/styleBrief。" +
+      "不需要用户先想缩写（不传 abbr 会自动生成）；不要用它改风格提示词（改已有风格用 deck_style_update）。",
+    parameters: {
+      type: "object",
+      properties: {
+        designId: { type: "string", description: "已有风格 id 或缩写（只在「补样张」时传；传了就不新建，也不改名称/提示词）" },
+        name: { type: "string", description: "风格名称（给人看的，如「深海琥珀」；新建时必填）" },
+        styleBrief: { type: "string", description: "风格提示词本体：颜色 / 材质 / 字体 / 版式等精确画面语言（新建时必填；出图时用它）" },
+        abbr: { type: "string", description: "风格缩写（2–6 位字母/数字，可省略，自动生成）" },
+        description: { type: "string", description: "给人看的画面描述（可选，默认同 styleBrief）" },
+        constraints: { type: "string", description: "不要什么（可选）" },
+        reference: { type: "string", description: "参考（可选；只给人看，不进出图 prompt）" },
+        deckId: { type: "string", description: "从哪个 deck 取样张（省略=当前会话绑定的 deck）" },
+        pages: { type: "array", items: { type: "string" }, description: '用哪几页的成品图当样张（如 ["p01","p02","p03"]；省略=该 deck 前 3 页有图的页）' },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: "object",
+        properties: {
+          designId: { type: "string" },
+          abbr: { type: "string" },
+          samples: { type: "array", items: { type: "object" } },
+        },
+      },
+      render: (_args, value) => [{ type: "text", text: String(value?.text ?? "") }],
+    },
+    execute: withToolEvent(store, "deck_style_create", async (args, exec) => {
+      if (typeof createStyle !== "function") throw new Error("当前挂载不支持创建风格（只在启用工具的 preset 会话里可用）");
+      const designKey = String(args?.designId ?? "").trim();
+      const name = String(args?.name ?? "").trim();
+      const styleBrief = String(args?.styleBrief ?? "").trim();
+      if (!designKey) {
+        if (!name) throw new Error("缺少 name：先给风格起个名字（给已有风格补样张请传 designId）");
+        if (!styleBrief) throw new Error("缺少 styleBrief：先写清这套风格的画面语言（颜色 / 材质 / 字体 / 版式）");
+      }
+      const sessionId = sessionIdOf(exec);
+      const binding = sessionId ? designs.listBindings().find((item) => item.sessionId === sessionId) : null;
+      const deckId = String(args?.deckId ?? "").trim()
+        || (binding?.kind === "deck" ? String(binding.id) : "");
+      const pages = Array.isArray(args?.pages) ? args.pages.map((page) => String(page)) : [];
+      const created = createStyle({
+        designId: designKey,
+        name,
+        abbr: String(args?.abbr ?? "").trim(),
+        styleBrief,
+        description: String(args?.description ?? "").trim(),
+        constraints: String(args?.constraints ?? "").trim(),
+        reference: String(args?.reference ?? "").trim(),
+        deckId,
+        pages,
+      });
+      const sampleLines = created.samples?.length
+        ? created.samples.map((item) => `- ${item.pageId} ${item.revision} → designs/${created.abbr}/${item.file}（${(item.sizeBytes / 1024 / 1024).toFixed(1)} MB，复制成品图，未重新出图）`)
+        : ["（这次没带样张；可以之后用 deck_design_sample 出，或在界面样张图片区补）"];
+      const headline = created.appended
+        ? `已给风格 ${created.abbr} · ${created.name} 补样张（designId: ${created.designId}）`
+        : `已登记风格：${created.abbr} · ${created.name}（designId: ${created.designId}）`;
+      const text = [
+        headline,
+        created.appended ? `现有样张合计 ${created.totalSamples ?? created.samples?.length ?? 0} 张` : `风格提示词：${styleBrief.slice(0, 120)}${styleBrief.length > 120 ? "…" : ""}`,
+        "",
+        `本次样张（${created.samples?.length ?? 0} 张）：`,
+        ...sampleLines,
+        "",
+        "以后新建 deck 时可以在「添加风格 / 新建 Deck」里选它；也可以把当前 deck 关联到它（deck_design_bind），之后出图会带这套 styleBrief。",
+        "想验证这套风格换个版面是否稳定，用 deck_design_sample 出 1–2 张不同版面的样张再给用户看。",
+      ].join("\n");
+      return {
+        designId: created.designId,
+        abbr: created.abbr,
+        samples: created.samples ?? [],
+        text,
+      };
+    }),
+  });
+
   // ── N+1. deck_design_sample ────────────────────────────────────────────────
   tools.push({
     name: "deck_design_sample",
@@ -2019,20 +2260,28 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
     }),
   });
 
-  // ── 4.5 deck_script_review（F-159）────────────────────────────────────────
+  // ── 4.5 deck_script_review（F-159 听众评审；F-172 两段式盲审 → 冻结 → 对照）──
   tools.push({
     name: "deck_script_review",
     description:
-      "听众评审（动态 persona）：按 intent 的「听众」生成独立审稿人（每个子 agent 只从该听众视角读整份 script），" +
-      "返回 P0/P1/P2 问题 + 原文证据 + 可直接落版的改法，写进 docs/review.experts.md。" +
-      "只审不改：评审结果不改 script，改稿仍走 deck_script_propose_edits + 用户确认。" +
-      "第一次整份 script 写完落版后跑一次；之后用户说「再审一次 / 再评一次」时再跑。",
+      "听众评审（两段式）：按 intent 的「听众」生成独立审稿人。第一段盲审——只给听众身份和稿件，不给意图，" +
+      "逐页四问（复述 / 承接 / 追问 / 下一步动作）后把结论冻结到 docs/review.blind.json；" +
+      "第二段对照——把冻结结论和 intent 一起给出，逐页判「是 / 部分 / 否」并做读者读出 X / 稿件 S / 意图 Y 的差异。" +
+      "phase=full（默认）跑完整两段；blind 只冻结；contrast 复用冻结记录（稿件改过会拒绝，需重跑盲审）。" +
+      "写 docs/review.experts.md（覆盖矩阵 + 差异表）+ docs/review.findings.json（可采纳清单）。只审不改：不改 script；" +
+      "改稿走 deck_script_propose_edits 并给每条 edit 带 reviewRef/severity/confidence/evidence，C 类（原文找不到证据）不许进提案。",
     parameters: {
       type: "object",
       properties: {
         deckId: { type: "string", description: "deck id，见 deck_source_overview" },
+        phase: {
+          type: "string",
+          enum: ["full", "blind", "contrast"],
+          description: "full（默认）= 盲审 + 冻结 + 对照；blind = 只跑盲审并冻结；contrast = 用已有冻结记录跑对照",
+        },
         maxReviewers: { type: "number", description: `最多几个审稿人（1–${HARD_MAX_REVIEWERS}，默认按 profile 配置，通常 2–3）` },
-        write: { type: "boolean", description: "是否写 docs/review.experts.md（默认 true；dry run 传 false）" },
+        write: { type: "boolean", description: "是否写 docs/review.experts.md 与 docs/review.blind.json（默认 true；dry run 传 false）" },
+        scores: { type: "boolean", description: "是否顺手打四维分（表意清晰 / 证据充分 / 结构连贯 / 意图达成，默认 true；false 时只出意见不打分）" },
       },
       required: ["deckId"],
       additionalProperties: false,
@@ -2051,7 +2300,10 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
       const sessionId = sessionIdOf(exec);
       const brief = readDeckBrief(adapter.sourceRoot);
       const script = workspace.scriptCurrent(deck.id) ?? "";
-      const rules = readDeckRules(adapter.sourceRoot);
+      const pages = pageIdsFromScript(script);
+      const scriptHash = scriptSnapshotHash(script);
+      const phase = ["full", "blind", "contrast"].includes(String(args.phase ?? "")) ? String(args.phase) : "full";
+      const freezePath = join(deckDir, "docs", BLIND_FREEZE_FILE);
       const runtime = resolveSubagents();
       const maxReviewers = Math.min(
         HARD_MAX_REVIEWERS,
@@ -2104,7 +2356,7 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
           .join("\n")
           .trim();
       };
-      const runReviewer = async (reviewer) => {
+      const runOne = async (reviewer, promptText, parseFn, validate, maxTokens) => {
         const controller = new AbortController();
         const onAbort = () => controller.abort();
         if (exec.signal?.aborted) controller.abort();
@@ -2126,15 +2378,10 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
               prompt: [
                 {
                   type: "text",
-                  text: reviewerPrompt({
-                    reviewer,
-                    brief,
-                    deckTitle: deck.title,
-                    script,
-                    rulesText: String(rules.content ?? "").slice(0, 4000),
-                  }),
+                  text: promptText,
                 },
               ],
+              ...(Number.isSafeInteger(maxTokens) && maxTokens > 0 ? { agentOptions: { maxTokens } } : {}),
               parent: exec.agent,
             },
             signal: controller.signal,
@@ -2144,11 +2391,9 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
           if (controller.signal.aborted) throw new Error("听众评审已取消或超时");
           if (result?.stopReason !== "completed") throw new Error(`审稿人未正常完成（${result?.stopReason ?? "unknown"}）`);
           const text = activationResultText(result);
-          const parsed = parseReviewerOutput(text);
-          if (parsed.unparsed) throw new Error("审稿人未返回符合契约的 JSON 意见");
-          if (parsed.issues.some((issue) => !script.includes(issue.evidence))) {
-            throw new Error("审稿意见的证据不是稿件原文，已拒绝采纳");
-          }
+          const parsed = parseFn(text);
+          if (parsed.unparsed) throw new Error("审稿人未返回符合契约的 JSON");
+          if (validate) validate(parsed);
           Object.assign(outcome, { parsed, text, stopReason: result.stopReason });
         } catch (error) {
           outcome.error = error instanceof Error ? error.message : String(error);
@@ -2164,38 +2409,357 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
         return outcome;
       };
 
-      // 审稿人并发跑：每个都是一次独立子 agent，互不影响；失败一个不拖垮整份评审。
-      const outcomes = await Promise.all(derived.reviewers.map((reviewer) => runReviewer(reviewer)));
-      const ok = outcomes.filter((outcome) => !outcome.error);
-      const failed = outcomes.filter((outcome) => outcome.error).map((outcome) => ({ label: outcome.label, error: outcome.error }));
-      const results = ok.map((outcome) => ({
-        reviewer: outcome.parsed.reviewer || outcome.reviewer.label,
-        label: outcome.reviewer.label,
-        issues: outcome.parsed.issues,
+      // ── 第一段：盲审（只给身份与稿件，不给意图）→ 冻结 ──────────────────
+      const runBlindPhase = async () => {
+        const outcomes = await Promise.all(
+          derived.reviewers.map((reviewer) =>
+            runOne(
+              reviewer,
+              blindReviewerPrompt({ reviewer, brief, deckTitle: deck.title, script }),
+              parseBlindOutput,
+              undefined,
+              Math.min(32_000, 8192 + pages.length * 1200),
+            ),
+          ),
+        );
+        const ok = outcomes.filter((outcome) => !outcome.error);
+        const failed = outcomes.filter((outcome) => outcome.error).map((outcome) => ({ label: outcome.label, error: outcome.error }));
+        const reviewers = ok.map((outcome) => ({
+          label: outcome.reviewer.label,
+          reviewer: outcome.parsed.blind.reviewer,
+          whole: outcome.parsed.blind.whole,
+          per_page: outcome.parsed.blind.per_page,
+        }));
+        const answered = new Set(reviewers.flatMap((item) => item.per_page.map((row) => row.page)));
+        const missing = pages.filter((page) => !answered.has(page));
+        const partial = pages.filter((page) => {
+          const hits = reviewers.filter((item) => item.per_page.some((row) => row.page === page)).length;
+          return hits > 0 && hits < reviewers.length;
+        });
+        const coverage = { expected: pages.length, answered: answered.size, missing, partial, complete: missing.length === 0 };
+        return { outcomes, failed, reviewers, coverage };
+      };
+
+      // ── 第二段：对照（冻结结论 + 意图，做 X / S / Y 三方差分）────────────
+      const runContrastPhase = async (frozenRecord) => {
+        const byLabel = new Map((frozenRecord?.reviewers ?? []).map((item) => [item.label, item]));
+        const outcomes = await Promise.all(
+          derived.reviewers.map((reviewer) => {
+            const prev = byLabel.get(reviewer.label) ?? frozenRecord?.reviewers?.[0];
+            if (!prev) {
+              return Promise.resolve({ reviewer, label: reviewer.label, error: "冻结记录里没有这位审稿人的盲审结论" });
+            }
+            return runOne(
+              reviewer,
+              contrastReviewerPrompt({
+                reviewer,
+                blind: { reviewer: prev.reviewer ?? prev.label, whole: prev.whole, per_page: prev.per_page },
+                brief,
+                deckTitle: deck.title,
+                script,
+              }),
+              parseContrastOutput,
+              (parsed) => {
+                const bad = parsed.contrast.gaps.find((gap) => gap.evidence && !scriptContainsEvidence(script, gap.evidence));
+                if (bad) throw new Error(`对照意见的证据不是稿件原文（${bad.page}），已拒绝采纳`);
+              },
+              Math.min(24_000, 6000 + pages.length * 900),
+            );
+          }),
+        );
+        const ok = outcomes.filter((outcome) => !outcome.error);
+        const failed = outcomes.filter((outcome) => outcome.error).map((outcome) => ({ label: outcome.label, error: outcome.error }));
+        // 每页一条差距：多位审稿人对同一页的判定合并（悲观取值 否 > 部分 > 是），
+        // 读者读出 / 改法取第一条非空，来源记全部审稿人——报告里一页一行，不按审稿人刷屏。
+        const rank = { 是: 0, 部分: 1, 否: 2 };
+        const byPage = new Map();
+        for (const outcome of ok) {
+          for (const gap of outcome.parsed.contrast.gaps) {
+            const label = outcome.reviewer.label;
+            const prev = byPage.get(gap.page);
+            if (!prev) {
+              byPage.set(gap.page, { ...gap, reviewer: label, from: [label] });
+              continue;
+            }
+            if ((rank[gap.verdict] ?? -1) > (rank[prev.verdict] ?? -1)) {
+              byPage.set(gap.page, { ...gap, reviewer: label, from: [...prev.from, label] });
+              continue;
+            }
+            prev.from.push(label);
+            prev.x = prev.x || gap.x;
+            prev.y = prev.y || gap.y;
+            prev.fix = prev.fix || gap.fix;
+            prev.evidence = prev.evidence || gap.evidence;
+          }
+        }
+        const gaps = [...byPage.values()]
+          .map((gap) => ({ ...gap, reviewer: gap.from.join(" / ") }))
+          .sort((a, b) => a.page.localeCompare(b.page));
+        const deckGap = ok.map((outcome) => outcome.parsed.contrast.deck_gap).filter(Boolean).join(" / ");
+        const deleteCandidates = [...new Set(ok.flatMap((outcome) => outcome.parsed.contrast.delete_candidates))];
+        return { outcomes, failed, gaps, deckGap, deleteCandidates };
+      };
+
+      const generatedAt = new Date().toISOString();
+      const target = join(deckDir, "docs", REVIEW_REPORT_FILE);
+      const writeFiles = args.write !== false && !exec.signal?.aborted;
+      const labels = derived.reviewers.map((reviewer) => reviewer.label).join(" / ");
+      let written = false;
+      let frozen = null;
+
+      // 只跑对照：必须用当轮稿件哈希匹配的冻结记录，稿子变了就拒绝（防止拿旧结论评新稿）。
+      if (phase === "contrast") {
+        if (!existsSync(freezePath)) {
+          return {
+            deckId: deck.id,
+            phase,
+            reviewers: [],
+            issues: [],
+            text: `还没有盲审冻结记录（docs/${BLIND_FREEZE_FILE}）：先跑 phase=blind（或 full）再对照。`,
+          };
+        }
+        try {
+          frozen = JSON.parse(readFileSync(freezePath, "utf8"));
+        } catch {
+          frozen = null;
+        }
+        const check = verifyFreeze(frozen, scriptHash);
+        if (!check.ok) {
+          return {
+            deckId: deck.id,
+            phase,
+            scriptHash,
+            reviewers: [],
+            issues: [],
+            text: `${check.reason}（冻结 ${frozen?.scriptHash ?? "无"} / 当前 ${scriptHash}）`,
+          };
+        }
+      }
+
+      // 盲审（full 也走这里）：先冻结再对照，顺序不能反。
+      let blind = null;
+      if (phase === "full" || phase === "blind") {
+        blind = await runBlindPhase();
+        if (writeFiles && blind.reviewers.length) {
+          mkdirSync(join(deckDir, "docs"), { recursive: true });
+          frozen = makeFreezeRecord({ deckId: deck.id, scriptHash, pages, reviewers: blind.reviewers, generatedAt });
+          writeFileSync(freezePath, `${JSON.stringify(frozen, null, 2)}\n`, "utf8");
+        }
+        const coverLine = `覆盖 ${blind.coverage.answered}/${blind.coverage.expected} 页${blind.coverage.missing.length ? `（缺答 ${blind.coverage.missing.join("、")}）` : ""}`;
+        const failLine = blind.failed.length
+          ? `\n${blind.failed.length} 位审稿人失败：${blind.failed.map((item) => `${item.label}（${item.error}）`).join(" / ")}`
+          : "";
+        if (phase === "blind") {
+          return {
+            deckId: deck.id,
+            phase,
+            scriptHash,
+            reviewers: derived.reviewers.map((reviewer) => ({ id: reviewer.id, label: reviewer.label })),
+            coverage: blind.coverage,
+            issues: [],
+            failed: blind.failed,
+            written: Boolean(frozen),
+            text: `盲审${frozen ? "已冻结" : "完成（dry run 未冻结）"}：${coverLine}${failLine}\n下一步跑 phase=contrast 才知道读者读出和意图差在哪。`,
+          };
+        }
+        if (!blind.reviewers.length) {
+          return {
+            deckId: deck.id,
+            phase,
+            scriptHash,
+            reviewers: derived.reviewers.map((reviewer) => ({ id: reviewer.id, label: reviewer.label })),
+            coverage: blind.coverage,
+            issues: [],
+            failed: blind.failed,
+            written: false,
+            text: `盲审没有有效结果，不能进入对照（也不据此判断稿件没有问题）：${coverLine}${failLine}`,
+          };
+        }
+        frozen = frozen ?? makeFreezeRecord({ deckId: deck.id, scriptHash, pages, reviewers: blind.reviewers, generatedAt });
+      }
+
+      if (!blind) {
+        // 只跑对照：从冻结记录里重建盲审视图（冻结记录就是第一段的事实来源）。
+        const frozenReviewers = (frozen?.reviewers ?? []).map((item) => ({
+          label: item.label,
+          reviewer: item.reviewer,
+          whole: item.whole,
+          per_page: item.per_page ?? [],
+        }));
+        const answered = new Set(frozenReviewers.flatMap((item) => item.per_page.map((row) => row.page)));
+        blind = {
+          outcomes: [],
+          failed: [],
+          reviewers: frozenReviewers,
+          coverage: {
+            expected: (frozen?.pages ?? pages).length,
+            answered: answered.size,
+            missing: (frozen?.pages ?? pages).filter((page) => !answered.has(page)),
+            partial: [],
+            complete: true,
+          },
+        };
+      }
+
+      const contrast = await runContrastPhase(frozen);
+      // F-176：可采纳清单 + G1 逐字匹配（B6 四道闸的第一道，程序判、不花模型）。
+      const built = buildFindings(script, contrast.gaps);
+      // F-177 / B6 G4：同一页被 ≥2 位独立审稿人命中 → 交叉确认，置信度不再只是单人口径。
+      let findings = built.findings.map((finding) => ({
+        ...finding,
+        reviewers: [...new Set(contrast.gaps.filter((gap) => gap.page === finding.page).flatMap((gap) => gap.from ?? []))],
       }));
-      const issues = mergeIssues(results);
+      findings = findings.map((finding) => ({ ...finding, crossReviewed: finding.reviewers.length >= 2, reviewers: finding.reviewers.length }));
+      let dropped = built.dropped;
+      let citation = { checked: 0, citationChecked: false, failed: "" };
+      // F-177 / B6 G3：引用核查——一次独立小调用，校对员角色（不是评审员）；
+      // 只核对 A 类条目，把 paraphrase 降到 B、unsupported 降到 D（D 仍列出但只作参考）。
+      if (findings.length && args.citationCheck !== false && exec?.agent) {
+        try {
+          const promptText = citationCheckPrompt({
+            items: findings.map((finding) => ({ id: finding.id, page: finding.page, evidence: finding.evidence, problem: finding.fix })),
+            script,
+            deckTitle: deck.title,
+          });
+          const verifier = { id: "citation", label: "引用核查" };
+          // runOne 是评审员的通用入口（解析 + 校验 + 超时）；这里复用同一套隔离与预算。
+          const outcome = await runOne(
+            verifier,
+            promptText,
+            (text) => parseCitationCheck(text),
+            null,
+            Math.min(8000, 1200 + findings.length * 120),
+          );
+          if (outcome.error) throw new Error(outcome.error);
+          const applied = applyCitationChecks(findings, outcome.parsed.checks);
+          findings = applied.findings;
+          citation = { checked: applied.checked, citationChecked: applied.citationChecked, failed: "" };
+        } catch (error) {
+          citation = { checked: 0, citationChecked: false, failed: String(error?.message ?? error) };
+        }
+      }
+      // F-183（I-08）：四维评分——对照之后只打分、不出新意见；默认开，args.scores === false 可跳过。
+      // 分数带 scriptHash / revision 落盘，两次评审可对照（「改完是不是更好了」不用凭感觉）。
+      let scoreMean = null;
+      let scoreCompare = null;
+      let scoreEntry = null;
+      const scoreFailed = [];
+      if (phase === "full" && args.scores !== false && exec?.agent && derived.reviewers.length) {
+        const records = [];
+        for (const reviewer of derived.reviewers) {
+          try {
+            const outcome = await runOne(
+              reviewer,
+              scoreReviewerPrompt({ reviewer, brief, deckTitle: deck.title, script }),
+              (text) => parseScoreOutput(text),
+              null,
+              2000,
+            );
+            if (outcome.error) throw new Error(outcome.error);
+            if (!outcome.parsed?.record) throw new Error("打分输出缺维度或分数越界");
+            records.push(outcome.parsed.record);
+          } catch (error) {
+            scoreFailed.push(`${reviewer.label}（${error?.message ?? error}）`);
+          }
+        }
+        if (records.length) {
+          scoreMean = mergeScoreRecords(records);
+          const scoresFile = join(deckDir, "docs", "review.scores.json");
+          const history = existsSync(scoresFile) ? JSON.parse(readFileSync(scoresFile, "utf8")) : [];
+          const historyList = Array.isArray(history) ? history : [];
+          const previous = historyList[historyList.length - 1] ?? null;
+          scoreCompare = compareScores(previous ? { dimensions: previous.scores, average: previous.average } : null, scoreMean);
+          const latestRevision = workspace.listScriptRevisions(deck.id)[0]?.revision ?? "";
+          scoreEntry = scoreHistoryEntry({ at: generatedAt, scriptHash, revision: latestRevision, mean: scoreMean, compare: scoreCompare });
+          if (writeFiles) {
+            historyList.push(scoreEntry);
+            const kept = historyList.slice(-50);
+            writeFileSync(scoresFile, `${JSON.stringify(kept, null, 2)}\n`, "utf8");
+            writeFileSync(join(deckDir, "docs", "review.scores.md"), renderScoreHistoryMarkdown(kept, { deckTitle: deck.title }), "utf8");
+          }
+        }
+      }
+      const issues = mergeIssues([{ label: "", issues: gapsToIssues(contrast.gaps) }]);
       const bySeverity = { P0: 0, P1: 0, P2: 0 };
       for (const issue of issues) bySeverity[issue.severity] = (bySeverity[issue.severity] ?? 0) + 1;
-      const generatedAt = new Date().toISOString();
-      const target = join(deckDir, "docs", "review.experts.md");
-      let written = false;
-      if (args.write !== false && !exec.signal?.aborted) {
+      const mergedBlind = mergeBlind(blind.reviewers.map((item) => ({ label: item.label, blind: item })));
+      const failed = [...blind.failed, ...contrast.failed];
+      const counts = { 是: 0, 部分: 0, 否: 0 };
+      for (const gap of contrast.gaps) counts[gap.verdict] = (counts[gap.verdict] ?? 0) + 1;
+
+      if (writeFiles) {
         mkdirSync(dirname(target), { recursive: true });
-        const body = [
-          renderReviewMarkdown({
-            deckTitle: deck.title,
-            brief,
-            reviewers: derived.reviewers,
-            issues,
-            generatedAt,
-            failed,
-          }),
-        ].join("\n");
+        const body = renderProtocolMarkdown({
+          deckTitle: deck.title,
+          generatedAt,
+          scriptHash,
+          reviewers: derived.reviewers,
+          mergedBlind,
+          coverage: blind.coverage,
+          gaps: contrast.gaps,
+          deckGap: contrast.deckGap,
+          deleteCandidates: contrast.deleteCandidates,
+          failed,
+        });
         writeFileSync(target, body.endsWith("\n") ? body : `${body}\n`, "utf8");
+        // 工作台「评审意见清单」直接读这份清单（不依赖 Agent 再复述一遍），C 类留在 dropped 里可审计。
+        writeFileSync(
+          join(deckDir, "docs", "review.findings.json"),
+          `${JSON.stringify({ deckId: deck.id, generatedAt, scriptHash, findings, dropped }, null, 2)}\n`,
+          "utf8",
+        );
         written = true;
+        // F-186：人话版两本——听众视角的读后感 + 负责人视角的意图差距。
+        // 数据全部来自上面的盲审 / 对照 / 清单，不额外调模型；改法建议按页取「最重的一条」。
+        const fixSuggestions = [...contrast.gaps]
+          .filter((gap) => gap.verdict !== "是" && gap.fix)
+          .sort((a, b) => (a.verdict === "否" ? -1 : 0) - (b.verdict === "否" ? -1 : 0));
+        const readersPath = "docs/review.readers.md";
+        const gapPath = "docs/review.gap.md";
+        let titleChain = null;
+        try {
+          const pageItems = pageIdsFromScript(script).map((page, index) => ({
+            page,
+            title: script.split(/\n(?=##\s|P\d+\s)/)[index]?.split("\n")[0]?.replace(/^#+\s*/, "").trim() ?? "",
+            claim: "",
+          }));
+          titleChain = analyzeTitleChain(pageItems);
+        } catch {
+          titleChain = null;
+        }
+        const titleChainLine = titleChain ? `${titleChain.verdict}${titleChain.stats ? `（${Object.entries(titleChain.stats).map(([key, value]) => `${key} ${value}`).join(" · ")}）` : ""}` : null;
+        // 页标题给听众文档用（盲审结果里没有标题，只有页号）
+        const pageTitles = Object.fromEntries([...script.matchAll(/^###\s+(P\d+)\s*·\s*(.+)$/gm)].map((match) => [match[1], match[2].trim()]));
+        const readersBody = renderReaderReviewMarkdown({
+          deckTitle: deck.title,
+          generatedAt,
+          audience: brief.audience ?? "",
+          gaps: contrast.gaps,
+          mergedBlind,
+          deckGap: contrast.deckGap,
+          fixSuggestions,
+          pageTitles,
+        });
+        const gapBody = renderGapReviewMarkdown({
+          deckTitle: deck.title,
+          generatedAt,
+          scriptHash,
+          audience: brief.audience ?? "",
+          intentText: [brief.audience, brief.takeaway].filter(Boolean).join(" · "),
+          gaps: contrast.gaps,
+          mergedBlind,
+          deckGap: contrast.deckGap,
+          findings,
+          dropped,
+          scores: scoreMean ? { average: scoreMean.average, dimensions: scoreMean.dimensions, compare: scoreCompare } : null,
+          titleChain: titleChainLine ? { verdict: titleChainLine } : null,
+          fixSuggestions,
+        });
+        writeFileSync(join(deckDir, "docs", "review.readers.md"), readersBody, "utf8");
+        writeFileSync(join(deckDir, "docs", "review.gap.md"), gapBody, "utf8");
         appendChangelogNote({
           deckDir,
-          note: `听众评审（${derived.reviewers.map((reviewer) => reviewer.label).join(" / ")}）：P0 ${bySeverity.P0} / P1 ${bySeverity.P1} / P2 ${bySeverity.P2}`,
+          note: `听众评审（两段式：盲审 ${blind.coverage.answered}/${blind.coverage.expected} 页 → 对照 是${counts.是}/部分${counts.部分}/否${counts.否}）`,
           actor: "agent",
         });
       }
@@ -2204,30 +2768,64 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
         deckId: deck.id,
         sessionId,
         actor: "agent",
-        status: failed.length === derived.reviewers.length ? "failed" : "succeeded",
+        status: contrast.failed.length && contrast.outcomes.length === contrast.failed.length ? "failed" : "succeeded",
         payload: {
+          phase,
+          scriptHash,
           reviewers: derived.reviewers.map((reviewer) => reviewer.id),
           audience: brief.audience ?? "",
+          coverage: { expected: blind.coverage.expected, answered: blind.coverage.answered, missing: blind.coverage.missing },
+          verdicts: counts,
           total: issues.length,
           bySeverity,
           failed: failed.map((item) => item.label),
           written,
         },
       });
-      const lines = issues.length
-        ? issues.map((issue) => `${issue.severity} · ${issue.page || "—"} · ${issue.problem} → ${issue.suggestion}${issue.reviewer ? `（${issue.reviewer}）` : ""}`)
-        : [ok.length ? "已完成评审，未发现有原文证据支持的可操作问题。" : "本次没有有效评审结果；不能据此判断稿件没有问题。"];
       const failureLine = failed.length
         ? `\n${failed.length} 位审稿人失败：${failed.map((item) => `${item.label}（${item.error}）`).join(" / ")}`
         : "";
       return {
         deckId: deck.id,
+        phase,
+        scriptHash,
         reviewers: derived.reviewers.map((reviewer) => ({ id: reviewer.id, label: reviewer.label, audience: reviewer.audience })),
+        coverage: blind.coverage,
+        blind: mergedBlind,
+        gaps: contrast.gaps,
+        deckGap: contrast.deckGap,
+        deleteCandidates: contrast.deleteCandidates,
         issues,
+        findings,
+        dropped,
+        citation,
         bySeverity,
         failed,
         written,
-        text: `听众评审（${derived.reviewers.map((reviewer) => reviewer.label).join(" / ")}）：P0 ${bySeverity.P0} / P1 ${bySeverity.P1} / P2 ${bySeverity.P2}${failureLine}\n${lines.join("\n")}${written ? `\n已写入：${target}` : "\n（dry run，未写文件）"}\n这些是评审意见，不是已改稿：按 P0/P1 用 deck_script_propose_edits 提案，等用户确认后再落版。`,
+        text:
+          // F-186：先讲人话（听众读到了什么 / 卡在哪 / 先改哪几页），内部口径压到括号里一行。
+          plainReviewSummary({
+            deckTitle: deck.title,
+            gaps: contrast.gaps,
+            mergedBlind,
+            deckGap: contrast.deckGap,
+            readersDoc: written ? "docs/review.readers.md" : "",
+            gapDoc: written ? "docs/review.gap.md" : "",
+            missing: failed.map((item) => item.label),
+          }) +
+          `\n\n（内部口径：审稿人 ${labels}；盲审覆盖 ${blind.coverage.answered}/${blind.coverage.expected} 页；对照 是 ${counts.是} / 部分 ${counts.部分} / 否 ${counts.否}${scoreMean ? `；四维均分 ${scoreMean.average}` : ""}${failureLine.replace(/\n/g, " ")}）` +
+          `${written ? `\n已写入：${target} · docs/review.readers.md · docs/review.gap.md（冻结：docs/${BLIND_FREEZE_FILE}）` : "\n（dry run，未写文件）"}` +
+          `\n给谁念：先按上面人话讲给用户听（不要念 P0/P1/置信度），再问要不要按「先改哪几页」逐条提案。\n` +
+          `可采纳清单（证据在稿件里逐字命中，A 可定位 / B 转述或支撑偏弱 / D 参考）：${findings.length ? findings.map((item) => `${item.id} · ${item.page} · ${item.severity} · ${item.confidence}${item.crossReviewed ? " · 交叉确认" : ""}`).join(" / ") : "无"}` +
+          `${citation.citationChecked ? `\n引用核查：${citation.checked} 条已由独立校对核对（G3）` : citation.failed ? `\n引用核查未完成：${citation.failed}（A 类按 G1 结果保留，回复里要说明没做 G3）` : ""}` +
+          `${dropped.length ? `\n无法核实（C 类，禁止据此改稿，只告诉用户）：${dropped.map((item) => `${item.id} · ${item.page}`).join(" / ")}` : ""}` +
+          "\n改稿时按清单逐条提案：deck_script_propose_edits 的每条 edit 带上 reviewRef（如 R01）+ severity + confidence + evidence；C 类一条都不要提。\n" +
+          "第二轮用的是第一段冻结的盲审结论，不是重新评审；工作台脚本页会把这批意见列成清单，用户勾选后点「接受并更新」合成一条 revision。" +
+          (scoreMean ? `\n${renderScoreSummary({ mean: scoreMean, compare: scoreCompare })}` : "") +
+          (scoreFailed.length ? `\n评分未完成：${scoreFailed.join(" / ")}` : ""),
+        scores: scoreMean,
+        scoreCompare,
+        scoreFailed,
       };
     }),
   });
@@ -2268,7 +2866,18 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
       const current = workspace.scriptCurrent(deck.id);
       if (current == null) throw new Error(`script 工作副本缺失：${deck.id}`);
       const parsed = parseSectionedPages(current);
-      const byTitle = new Map(parsed.map((page) => [String(page.title ?? "").trim(), page]));
+      // 只拿「唯一标题」做标题匹配：新建 deck 的占位稿 6 页标题可能全是「待定」，
+      // 用标题建 Map 会互相覆盖，把对得上的页全报成错位（S22 真机暴露的假阳性）。
+      const titleCounts = new Map();
+      for (const page of parsed) {
+        const title = String(page.title ?? "").trim();
+        titleCounts.set(title, (titleCounts.get(title) ?? 0) + 1);
+      }
+      const byTitle = new Map(
+        parsed
+          .filter((page) => titleCounts.get(String(page.title ?? "").trim()) === 1)
+          .map((page) => [String(page.title ?? "").trim(), page]),
+      );
       const problems = [];
       const blocks = [];
       deck.slides.forEach((slide, index) => {
@@ -2331,6 +2940,15 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
       type: "object",
       properties: {
         deckId: { type: "string" },
+        autoland: {
+          type: "boolean",
+          description:
+            "首稿自动落版：仅当这份 deck 一次都没落过 revision（首稿）时可用——提交的这批修改立即落成 revision，不再逐条等用户确认。" +
+            "有历史版本的 deck 会被工具拒绝（走普通提案 + 用户确认）。自改轮次 / 摘要请一起传，落版会记进 autoland 元数据。",
+        },
+        selfReviewRounds: { type: "number", description: "首稿自改跑了几轮（0–3；自动落版记录用）" },
+        selfReviewSummary: { type: "string", description: "自改摘要：主要改了哪几类（≤80 字，落版后要原样告诉用户）" },
+        reviewId: { type: "string", description: "这次自改依据的评审记录 id / 路径（可选）" },
         edits: {
           type: "array",
           minItems: 1,
@@ -2339,9 +2957,13 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
             type: "object",
             properties: {
               page: { type: "number", description: "页号（script 里的 N）" },
-              field: strEnum([...Object.keys(SCRIPT_FIELD_CELL), "body", "visualBrief"]),
+              field: strEnum([...Object.keys(SCRIPT_FIELD_CELL), ...CONTRACT_FIELD_KEYS, "body", "visualBrief"]),
               newValue: { type: "string", description: "新值全文（不是增量）" },
               reason: { type: "string" },
+              reviewRef: { type: "string", description: "评审清单条目号（如 R03）" },
+              severity: { type: "string", description: "P0 / P1 / P2" },
+              confidence: { type: "string", description: "A / B / C / D；C 不许提" },
+              evidence: { type: "string", description: "评审原文证据（逐字）" },
             },
             required: ["page", "field", "newValue"],
             additionalProperties: false,
@@ -2376,32 +2998,92 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
       if (!single) throw new Error("内部错误：找不到 deck_script_propose_edit");
       const created = [];
       const styleHints = [];
+      // F-183 附带：一条坏 edit 不许拖垮整批（60 条里 1 条定位不到，另外 59 条应该照常提案）。
+      // 但首稿自动落版例外——半份稿自动落库比报错更糟，所以 autoland 时任何失败都直接抛出，不落版。
+      const failures = [];
       for (const edit of edits) {
-        const value = await single.execute(
-          {
-            deckId: args.deckId,
-            page: edit?.page,
-            field: edit?.field,
-            newValue: edit?.newValue,
-            reason: edit?.reason ?? "",
-          },
-          exec,
-        );
-        if (Array.isArray(value?.styleHints)) styleHints.push(...value.styleHints);
+        let value;
+        try {
+          value = await single.execute(
+            {
+              deckId: args.deckId,
+              page: edit?.page,
+              field: edit?.field,
+              newValue: edit?.newValue,
+              reason: edit?.reason ?? "",
+              reviewRef: edit?.reviewRef,
+              severity: edit?.severity,
+              confidence: edit?.confidence,
+              evidence: edit?.evidence,
+            },
+            exec,
+          );
+        } catch (error) {
+          failures.push({ page: edit?.page, field: String(edit?.field ?? ""), error: String(error?.message ?? error) });
+          if (args.autoland === true) {
+            throw new Error(
+              `首稿自动落版中止：${failures.length} 条修改没能应用（${failures.map((item) => `${item.page}·${item.field}：${item.error}`).join(" / ")}）。` +
+                "没有落版，改完这几条后整批重提；不要分两批落首稿。",
+            );
+          }
+          continue;
+        }
+        if (Array.isArray(value?.styleHints)) styleHints.push(...(value?.styleHints ?? []));
         created.push({
           pageId: value?.slideIds?.[0] ?? `p${String(edit?.page).padStart(2, "0")}`,
           field: String(edit?.field ?? ""),
           proposalId: String(value?.proposalId ?? ""),
         });
       }
+      // F-173：首稿自动落版——这批修改合成一条 revision 直接落库，不再逐条等确认。
+      if (args.autoland === true) {
+        const proposals = created.map((item) => workspace.proposal(item.proposalId)).filter(Boolean);
+        const landed = applyFirstDraftBatch({
+          store,
+          workspace,
+          proposals,
+          autoland: {
+            draftRound: 1,
+            selfReview: {
+              rounds: Number(args.selfReviewRounds ?? 0),
+              summary: String(args.selfReviewSummary ?? ""),
+              reviewId: String(args.reviewId ?? ""),
+            },
+          },
+          sessionId: sessionIdOf(exec),
+          syncScriptToSource,
+        });
+        const pending = workspace.listProposals(args.deckId, "waiting-user");
+        const record = landed.autoland ?? {};
+        return {
+          deckId: args.deckId,
+          proposals: created,
+          autoland: { revision: landed.revision, rolledInto: created.length, selfReview: record.selfReview ?? {} },
+          pendingCount: pending.length,
+          styleHints,
+          text:
+            `首稿自动落版：${created.length} 条修改已合成 revision ${landed.revision}（旧版保留，可回滚）。\n` +
+            `自改 ${record.selfReview?.rounds ?? 0} 轮${record.selfReview?.summary ? `，主要改了「${record.selfReview.summary}」` : ""}。\n` +
+            `这是首稿、未经用户逐条确认；落版后要主动告诉用户「自改摘要 + 可回滚」，回滚用 deck_draft_rollback。` +
+            `${landed.sourceSync ? (landed.sourceSync.ok ? "源 script.md 已回写并提交。" : `源 script.md 已回写，git 未提交：${landed.sourceSync.error}。`) : ""}` +
+            `${styleHints.length ? `\n文案提醒（不阻断，建议下轮改）：\n${styleHints.map((hint) => `- ${hint}`).join("\n")}` : ""}`,
+        };
+      }
+      if (!created.length) {
+        throw new Error(`${failures.length} 条修改都没能应用：${failures.map((item) => `${item.page}·${item.field}：${item.error}`).join(" / ")}`);
+      }
       const pendingNow = workspace.listProposals(args.deckId, "waiting-user");
       const lines = created.map((item) => `${item.pageId} · ${item.field} → ${item.proposalId}`);
+      const failedLine = failures.length
+        ? `\n${failures.length} 条没能应用（其余已提案，这几条要重新定位后补提）：${failures.map((item) => `${item.page}·${item.field}：${item.error}`).join(" / ")}`
+        : "";
       return {
         deckId: args.deckId,
         proposals: created,
+        failures,
         pendingCount: pendingNow.length,
         styleHints,
-        text: `已提交 ${created.length} 条提案（waiting-user）：\n${lines.join("\n")}\n队列：整个 deck ${pendingNow.length} 条待确认。可以逐条确认，或在工作台点「全部确认落版」；确认前不要渲染。${styleHints.length ? `\n文案提醒（不阻断提案，建议先改）：\n${styleHints.map((hint) => `- ${hint}`).join("\n")}` : ""}`,
+        text: `已提交 ${created.length} 条提案（waiting-user）：\n${lines.join("\n")}${failedLine}\n队列：整个 deck ${pendingNow.length} 条待确认。可以逐条确认，或在工作台点「全部确认落版」；确认前不要渲染。${styleHints.length ? `\n文案提醒（不阻断提案，建议先改）：\n${styleHints.map((hint) => `- ${hint}`).join("\n")}` : ""}`,
       };
     }),
   });
@@ -2414,6 +3096,218 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
       return execute(args, exec);
     };
   }
+
+  // ── 4.6 deck_image_review（F-178 图片评审：保真转写×2 → 表意盲述 + 对照 → 五维打分）──
+  tools.push({
+    name: "deck_image_review",
+    description:
+      "审已出图的页：图有没有如实呈现这页（保真）、有没有扭曲或超载意思（表意）、贴合与承接如何（五维打分）。" +
+      "做法是视觉模型只做逐字转写（两次），判定全由程序做 diff；不引入 OCR。" +
+      "出图后自动/按需调用；保真不过＝错字错数，必须重出该页；同一页 3 次不过转人工。" +
+      "结果写进该版本 qa.json 的 review 字段 + docs/review.images.md。",
+    parameters: {
+      type: "object",
+      properties: {
+        deckId: { type: "string", description: "deck id" },
+        page: { type: "string", description: "页码，p01 或 1 都行" },
+        image: { type: "string", description: "指定图片路径（可选；缺省用该页最新版本的图）" },
+        intent: { type: "string", description: "本页在整份 deck 里的意图（可选；缺省用 intent 文档的听众 / 目的）" },
+        skipBlind: { type: "boolean", description: "跳过盲述（省一次调用，但表意只能靠对照；一般不跳过）" },
+      },
+      required: ["deckId", "page"],
+      additionalProperties: false,
+    },
+    output: { schema: { type: "object", properties: { deckId: { type: "string" }, pageId: { type: "string" }, gate: { type: "boolean" } } }, render: (_args, value) => [{ type: "text", text: String(value?.text ?? "") }] },
+    execute: withToolEvent(store, "deck_image_review", async (args) => {
+      const adapter = adapterFor(args.deckId);
+      const deck = workspace.ensureDeck(adapter, { styleBrief: config.styleBrief });
+      const rawPage = String(args.page ?? "").trim();
+      const pageId = /^p\d+$/i.test(rawPage) ? rawPage.toLowerCase() : `p${String(Number(rawPage) || 0).padStart(2, "0")}`;
+      const slide = deck.slides.find((candidate) => candidate.id === pageId);
+      if (!slide) throw new Error(`${deck.id} 没有 ${pageId}（现有页：${deck.slides.map((item) => item.id).join(" / ")}）`);
+
+      const deckDir = workspace.deckDir(deck.id);
+      const resolveImage = () => {
+        if (args.image) {
+          const candidate = resolve(String(args.image));
+          if (!existsSync(candidate)) throw new Error(`指定的图不存在：${candidate}`);
+          return candidate;
+        }
+        const versionsDir = join(deckDir, "slides", pageId, "versions");
+        if (!existsSync(versionsDir)) throw new Error(`${pageId} 还没出过图（没有 versions/），先出图再评审`);
+        const versions = readdirSync(versionsDir).filter((name) => /^v\d+$/.test(name)).sort();
+        for (let index = versions.length - 1; index >= 0; index -= 1) {
+          for (const name of ["image.png", "image.jpg", "image.jpeg", "image.webp"]) {
+            const candidate = join(versionsDir, versions[index], name);
+            if (existsSync(candidate)) return candidate;
+          }
+        }
+        throw new Error(`${pageId} 的最新版本里没有图片文件，先出图再评审`);
+      };
+      const imagePath = resolveImage();
+
+      // C1 的对照基准 = 出这张图时用的 prompt（不是当前 script：图可能是旧稿出的）。
+      const versionDirs = readdirSync(join(deckDir, "slides", pageId, "versions")).filter((name) => /^v\d+$/.test(name)).sort();
+      const versionDir = join(deckDir, "slides", pageId, "versions", versionDirs[versionDirs.length - 1]);
+      const prompts = [...versionDirs].reverse()
+        .map((name) => join(deckDir, "slides", pageId, "versions", name, "prompt.txt"))
+        .filter((file) => existsSync(file))
+        .map((file) => readFileSync(file, "utf8"));
+      const expected = pickRenderExpectations(prompts) ?? { title: slide.title, question: slide.question, claim: slide.claim, body: "", quoted: [], numbers: [] };
+      const renderPrompt = prompts.find((prompt) => (pickRenderExpectations([prompt])?.title || "") !== "") ?? "";
+      // 图是不是旧稿出的：prompt 里的标题 vs 当前 script 标题（不同就提示重出，而不是当「错字」）。
+      const script = workspace.scriptCurrent(deck.id) ?? "";
+      const pageNo = Number(pageId.replace(/^p/, ""));
+      const pageData = parseSectionedPages(script).find((page) => page.page === pageNo);
+      const scriptTitle = pageData?.title || slide.title;
+      const drift = Boolean(expected.title && scriptTitle && expected.title !== scriptTitle)
+        ? `图是按旧稿出的：图上标题「${expected.title}」，当前稿件标题「${scriptTitle}」——先确认是不是要重出这页`
+        : "";
+      const pageText = pageData
+        ? [`标题：${pageData.title}`, `副标题：${pageData.question}`, `主张：${pageData.claim}`, pageData.content].filter(Boolean).join("\n")
+        : `标题：${slide.title}\n副标题：${slide.question}\n主张：${slide.claim}`;
+      const brief = readDeckBrief(adapter.sourceRoot);
+      const intentText = args.intent || [brief.audience ? `听众：${brief.audience}` : "", brief.topic ? `主题：${brief.topic}` : "", brief.intent ? `目的：${brief.intent}` : ""].filter(Boolean).join("；");
+      const linked = linkedDesignStyle(deck.id);
+      const prevSlide = deck.slides.find((item) => item.order === slide.order - 1);
+
+      const settings = config.imageReview ?? {};
+      const apiKey = env[settings.apiKeyEnv] || (settings.apiKeyFile ? readKeyFromFile(settings.apiKeyFile, settings.apiKeyEnv) : "");
+      // C1 + C2 + C3 + C4：编排在 lib/image-review.js（verify 脚本共用同一条路径）。
+      // 封面页：署名 / 场合 / 日期是版式要求，判「超载」时要放过（C2 校正，见 normalizeContrastForPage）。
+      const isCover = slide.order === 1 || /封面/.test(String(slide.fields?.["角色"] ?? ""));
+      const outcome = await runImageReview({
+        imagePath,
+        pageId,
+        expected,
+        pageText,
+        intentText,
+        styleAnchor: linked ? `${linked.abbr} ${linked.name}：${linked.brief}` : config.styleBrief,
+        prevPageText: prevSlide ? `${prevSlide.id} ${prevSlide.title}：${prevSlide.claim || prevSlide.question || ""}` : "",
+        visualBrief: String(slide.visualBrief ?? "").trim(),
+        cover: isCover,
+        settings: { ...settings, apiKey },
+        skipBlind: args.skipBlind === true,
+        fetchImpl: visionFetch ?? fetch,
+      });
+      let { fidelity, dual, meaning, contrast, review, advice, blind } = outcome;
+      const { transcription, blindError } = outcome;
+      // 图是按旧稿出的：差异来自「稿件改了、图没重出」，不是图写错字 / 说反话。
+      // 单独标「旧稿」，不把版本差异判成扭曲（否则用户会去改 prompt，其实该做的是确认要不要重出）。
+      if (drift) {
+        meaning = { verdict: "旧稿", severity: "", score: 3 };
+        review = { ...review, gate: false, blockers: ["图基于旧稿（与当前稿件不一致）：先确认是否重出这页", ...review.blockers.filter((line) => !/表意/.test(line))] };
+      }
+
+      // 落盘：qa.json 的 review 字段（保留历史 attempts，3 次阈值靠它累计）。
+      const qaFile = join(versionDir, "qa.json");
+      const previousQa = existsSync(qaFile) ? JSON.parse(readFileSync(qaFile, "utf8")) : {};
+      const attempts = attemptsOf(previousQa) + 1;
+      const mustHuman = review.mustHuman || (!review.gate && attempts >= 3);
+      const record = {
+        page: pageId,
+        revision: versionDirs[versionDirs.length - 1],
+        image: relative(deckDir, imagePath),
+        verdict: mustHuman && !review.gate ? "转人工" : meaning.verdict === "通过" && fidelity.verdict === "通过" ? "通过" : "需重出",
+        gate: review.gate,
+        scores: review.scores,
+        total: review.total,
+        blockers: review.blockers,
+        attempts,
+        mustHuman,
+        fidelity: { verdict: fidelity.verdict, unstable: fidelity.unstable, diffs: fidelity.blockers },
+        meaning,
+        contrast,
+        blind,
+        transcription,
+        dual,
+        advice,
+        model: settings.model || "",
+        drift,
+        checkedAt: new Date().toISOString(),
+      };
+      const nextQa = { ...previousQa, review: record };
+      writeFileSync(qaFile, `${JSON.stringify(nextQa, null, 2)}\n`, "utf8");
+
+      // 整本汇总：把每页最新版本的 review 拍平成 review.images.md。
+      const rows = [];
+      for (const item of deck.slides) {
+        const dir = join(deckDir, "slides", item.id, "versions");
+        if (!existsSync(dir)) continue;
+        const stamps = readdirSync(dir).filter((name) => /^v\d+$/.test(name)).sort();
+        for (let index = stamps.length - 1; index >= 0; index -= 1) {
+          const file = join(dir, stamps[index], "qa.json");
+          if (!existsSync(file)) continue;
+          try {
+            const qa = JSON.parse(readFileSync(file, "utf8"));
+            if (qa?.review?.scores) rows.push({ ...qa.review, page: item.id });
+          } catch { /* 坏 qa 不影响汇总 */ }
+          break;
+        }
+      }
+      const docsDir = join(deckDir, "docs");
+      mkdirSync(docsDir, { recursive: true });
+      writeFileSync(join(docsDir, "review.images.md"), renderImageReviewMarkdown({ deckTitle: deck.title, generatedAt: new Date().toISOString(), rows }), "utf8");
+
+      const scoreLine = Object.entries(review.scores).map(([key, value]) => `${key} ${value}`).join(" · ");
+      const diffLines = (fidelity.blockers ?? []).slice(0, 6).map((diff) => {
+        if (diff.type === "missing") return `✗ 缺 ${diff.field}：应出现「${String(diff.expected).slice(0, 40)}」`;
+        if (diff.type === "extra") return `✗ 多出 ${diff.field}：「${String(diff.actual).slice(0, 40)}」`;
+        return `✗ 错 ${diff.field}：应为「${String(diff.expected).slice(0, 40)}」，图上「${String(diff.actual).slice(0, 40)}」${diff.ratio != null ? `（差异 ${(diff.ratio * 100).toFixed(1)}%）` : ""}`;
+      });
+      const text = [
+        `${pageId}（${versionDirs[versionDirs.length - 1]}）图片评审：${record.verdict} · 门禁${record.gate ? "过" : "不过"}`,
+        `五维：${scoreLine}（总分 ${review.total}/25）`,
+        "",
+        `保真（转写两次${dual.stable ? "一致" : `不一致：${dual.unstable.join(" / ")}`}）：${fidelity.verdict}`,
+        ...(diffLines.length ? diffLines : ["✓ 标题 / 数字 / 正文逐段对得上"]),
+        "",
+        `表意：${meaning.verdict}${meaning.severity ? `（${meaning.severity}）` : ""}`,
+        blind ? `盲述：${blind.what}｜想让我：${blind.ask}${blind.confusing && blind.confusing !== "无" ? `｜费解：${blind.confusing}` : ""}` : "盲述：已跳过（只做了对照）",
+        contrast.contradiction ? `矛盾：${contrast.contradiction}` : contrast.extra.length ? `多出：${contrast.extra.join("；")}` : "对照：与主张一致，无多出信息",
+        "",
+        ...(advice.length ? ["怎么改（按 C5 顺序）：", ...advice.map((item) => `· ${item.failure} → 先${item.firstChange}；重出范围：${item.scope}`)] : ["可交付：保真与表意都过（其余维度只记录，不做门禁）。"]),
+        ...(drift ? [`⚠ ${drift}`] : []),
+        ...(record.blockers.length ? [`门禁未过：${record.blockers.join("；")}`] : []),
+        mustHuman ? `⚠ 同一页第 ${attempts} 次不过 → 转人工（记录在 qa.json 的 review.attempts；不要无限重试）。` : "",
+        `已写入：${relative(deckDir, qaFile)}（review 字段）· docs/review.images.md`,
+      ].filter(Boolean).join("\n");
+
+      return { deckId: deck.id, pageId, revision: versionDirs[versionDirs.length - 1], gate: review.gate, mustHuman, attempts, scores: review.scores, drift, text };
+    }),
+  });
+
+  // ── 4.7 deck_title_chain（F-179 标题串读：只看标题能不能推出故事线）──────────
+  tools.push({
+    name: "deck_title_chain",
+    description:
+      "标题串读测试：把稿件的页标题按顺序串起来，判断「只看标题能不能推出故事线」。" +
+      "只查机器能查的：占位标题 / 重复标题 / 相邻标题断链 / 有没有收束页。确定性、不花模型。" +
+      "写或大改 script 前、用户问「故事线通不通」时先跑它；推不出就先修标题链再往下写。",
+    parameters: {
+      type: "object",
+      properties: { deckId: { type: "string", description: "deck id" } },
+      required: ["deckId"],
+      additionalProperties: false,
+    },
+    output: { schema: { type: "object", properties: { deckId: { type: "string" }, verdict: { type: "string" } } }, render: (_args, value) => [{ type: "text", text: String(value?.text ?? "") }] },
+    execute: withToolEvent(store, "deck_title_chain", async (args) => {
+      const adapter = adapterFor(args.deckId);
+      const deck = workspace.ensureDeck(adapter, { styleBrief: config.styleBrief });
+      const script = workspace.scriptCurrent(deck.id) ?? "";
+      const pages = parseSectionedPages(script);
+      if (!pages.length) {
+        return { deckId: deck.id, verdict: "推不出", text: "稿件里还没有可读的页标题（script 工作副本为空）。先写 P01 起的分节标题，再跑标题串读。" };
+      }
+      const analysis = analyzeTitleChain(pages.map((page) => ({ page: page.page, title: page.title, claim: page.claim })));
+      return {
+        deckId: deck.id,
+        verdict: analysis.verdict,
+        stats: analysis.stats,
+        text: `${renderTitleChain({ deckTitle: deck.title, analysis })}\n（这份报告是确定性判断：只查占位 / 重复 / 断链 / 收束，不评价标题文采。）`,
+      };
+    }),
+  });
 
   // ── F-125：logo 水印 ──────────────────────────────────────────────────────
   tools.push({

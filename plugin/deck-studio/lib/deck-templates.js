@@ -20,7 +20,7 @@ const orPlaceholder = (value, hint) => (pad(value) ? pad(value) : `（待补：$
  * intent.md 初始内容。
  * @param {{title:string, audience?:string, topic?:string, intent?:string, references?:string, created?:string, owner?:string}} input
  */
-export function buildIntentMarkdown({ title, audience = "", topic = "", intent = "", references = "", occasion = "", success = "", scopeOut = "", created = "", owner = "" } = {}) {
+export function buildIntentMarkdown({ title, audience = "", topic = "", intent = "", references = "", occasion = "", success = "", scopeOut = "", argument = "", skeletonType = "", pageOrder = "", keepThree = "", created = "", owner = "" } = {}) {
   const heading = pad(title) || "（deck 标题）";
   return [
     "---",
@@ -38,6 +38,13 @@ export function buildIntentMarkdown({ title, audience = "", topic = "", intent =
     `- **场合 / 时长**：${orPlaceholder(occasion, "内部培训 / 客户评审 / 分享会；多少分钟")}`,
     `- **成功标准**：${orPlaceholder(success, "怎么判断这场讲成了")}`,
     `- **不讲的**：${orPlaceholder(scopeOut, "明确排除什么，避免范围膨胀")}`,
+    "",
+    "## 论证骨架（写页之前先定）",
+    "",
+    `- **核心论证**：${orPlaceholder(argument, "因为 [X]，所以 [Y]；听众要做的是 [Z]")}`,
+    `- **骨架类型**：${orPlaceholder(skeletonType, "结论先行 / 故事线 / 教学分解 / 视觉主导 / 中性简报，或自由写一句")}`,
+    `- **页序角色**：${orPlaceholder(pageOrder, "封面 → 结论 → 证据1 → 证据2 → 风险 → 请求；只写角色，不写标题")}`,
+    `- **只留 3 页留哪 3 页**：${orPlaceholder(keepThree, "答不出来说明论证还没想清——先想清楚再列页")}`,
     "",
     "## 参考资料",
     "",
