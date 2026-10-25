@@ -1,0 +1,101 @@
+{
+  "format": 1,
+  "title": {
+    "en": "Deckline plugins",
+    "zh": "Deckline 插件"
+  },
+  "description": {
+    "en": "Plugins for Deckline, the image-deck workbench for DSH.",
+    "zh": "Deckline（DSH 图片 deck 工作台）相关的插件索引。"
+  },
+  "metadata": {
+    "categories": {
+      "presentation": {
+        "title": {
+          "en": "Presentations & decks",
+          "zh": "演示与 Deck"
+        }
+      }
+    },
+    "labels": {
+      "image-deck": {
+        "title": {
+          "en": "Image deck",
+          "zh": "图片 Deck"
+        }
+      },
+      "dsh-plugin": {
+        "title": {
+          "en": "DSH plugin",
+          "zh": "DSH 插件"
+        }
+      }
+    },
+    "sortKeys": {
+      "published": {
+        "title": {
+          "en": "Published",
+          "zh": "发布时间"
+        },
+        "order": "desc"
+      }
+    }
+  },
+  "plugins": [
+    {
+      "name": "dsh-plugin-deck-studio",
+      "title": {
+        "en": "Deckline · Image Deck / PPT Studio",
+        "zh": "Deckline · 图片 Deck / PPT 工作台"
+      },
+      "description": {
+        "en": "Turn a chat into a PPT: image-deck workbench for DSH — storyboard, per-page prompts, AI image generation with revisions, design styles, PDF/PPTX export.",
+        "zh": "用对话做 PPT：DSH 的 image deck 工作台——故事线、逐页 prompt、AI 出图与版本留存、设计风格库、导出 PDF/PPTX。"
+      },
+      "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCIgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSJub25lIj4KICA8ZGVmcz4KICAgIDxsaW5lYXJHcmFkaWVudCBpZD0iYmciIHgxPSI0IiB5MT0iMiIgeDI9IjYwIiB5Mj0iNjIiIGdyYWRpZW50VW5pdHM9InVzZXJTcGFjZU9uVXNlIj4KICAgICAgPHN0b3Agc3RvcC1jb2xvcj0iIzBlNTU2MyIvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzA4MzQzZCIvPgogICAgPC9saW5lYXJHcmFkaWVudD4KICAgIDxsaW5lYXJHcmFkaWVudCBpZD0iZ29sZCIgeDE9IjQwIiB5MT0iOCIgeDI9IjU4IiB5Mj0iMjYiIGdyYWRpZW50VW5pdHM9InVzZXJTcGFjZU9uVXNlIj4KICAgICAgPHN0b3Agc3RvcC1jb2xvcj0iI2U4YjQ1YyIvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iI2M1ODgyZiIvPgogICAgPC9saW5lYXJHcmFkaWVudD4KICAgIDxsaW5lYXJHcmFkaWVudCBpZD0iY2FyZCIgeDE9IjE4IiB5MT0iMTYiIHgyPSI1MCIgeTI9IjQ0IiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSI+CiAgICAgIDxzdG9wIHN0b3AtY29sb3I9IiNmZmZkZjgiLz48c3RvcCBvZmZzZXQ9IjEiIHN0b3AtY29sb3I9IiNlZmU4ZDkiLz4KICAgIDwvbGluZWFyR3JhZGllbnQ+CiAgPC9kZWZzPgogIDxyZWN0IHdpZHRoPSI2NCIgaGVpZ2h0PSI2NCIgcng9IjE2IiBmaWxsPSJ1cmwoI2JnKSIvPgogIDxyZWN0IHg9IjEzIiB5PSIzNCIgd2lkdGg9IjM0IiBoZWlnaHQ9IjIxIiByeD0iMy41IiBmaWxsPSIjZmFmOGYyIiBvcGFjaXR5PSIuMjgiIHRyYW5zZm9ybT0icm90YXRlKC0xMCAzMCA0NC41KSIvPgogIDxyZWN0IHg9IjE1IiB5PSIyNiIgd2lkdGg9IjM0IiBoZWlnaHQ9IjIxIiByeD0iMy41IiBmaWxsPSIjZmFmOGYyIiBvcGFjaXR5PSIuNTUiIHRyYW5zZm9ybT0icm90YXRlKC01IDMyIDM2LjUpIi8+CiAgPHJlY3QgeD0iMTciIHk9IjE3IiB3aWR0aD0iMzQiIGhlaWdodD0iMjIiIHJ4PSIzLjUiIGZpbGw9InVybCgjY2FyZCkiLz4KICA8cmVjdCB4PSIyMiIgeT0iMjMiIHdpZHRoPSIxOSIgaGVpZ2h0PSIyLjYiIHJ4PSIxLjMiIGZpbGw9IiMwZjY5NzUiLz4KICA8cmVjdCB4PSIyMiIgeT0iMjkiIHdpZHRoPSIxMiIgaGVpZ2h0PSIyLjIiIHJ4PSIxLjEiIGZpbGw9IiMxNDk2YTgiIG9wYWNpdHk9Ii43NSIvPgogIDxwYXRoIGQ9Ik00OC41IDkuNWwyLjIgNS40IDUuNCAyLjItNS40IDIuMi0yLjIgNS40LTIuMi01LjQtNS40LTIuMiA1LjQtMi4yeiIgZmlsbD0idXJsKCNnb2xkKSIvPgo8L3N2Zz4K",
+      "author": "Yuna",
+      "homepage": "https://github.com/yuna78/dsh-deck-studio#readme",
+      "repository": {
+        "url": "https://github.com/yuna78/dsh-deck-studio",
+        "directory": "plugin/deck-studio"
+      },
+      "metadata": {
+        "category": "presentation",
+        "keywords": [
+          "deck",
+          "image deck",
+          "presentation",
+          "slides",
+          "ppt",
+          "pptx",
+          "powerpoint",
+          "ai ppt",
+          "slide deck",
+          "deckline",
+          "幻灯片",
+          "演示文稿"
+        ],
+        "labels": [
+          "image-deck",
+          "dsh-plugin"
+        ],
+        "sortKeys": {
+          "published": 1792899000
+        }
+      },
+      "versions": [
+        {
+          "version": "0.2.4",
+          "publishTimestamp": 1792899887,
+          "source": {
+            "type": "npm",
+            "registry": "https://registry.npmmirror.com"
+          },
+          "engines": {
+            "dsh": ">=0.1.7-0 <0.3.0"
+          }
+        }
+      ]
+    }
+  ]
+}

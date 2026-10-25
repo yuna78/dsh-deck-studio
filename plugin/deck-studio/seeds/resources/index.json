@@ -1,0 +1,19 @@
+{
+  "items": [
+    {
+      "name": "deckline-logo",
+      "file": "deckline-logo.png",
+      "description": "Deckline 字标（横版，透明底）"
+    },
+    {
+      "name": "deckline-logo-svg",
+      "file": "deckline-logo.svg",
+      "description": "Deckline 字标矢量版"
+    },
+    {
+      "name": "deckline-mark",
+      "file": "deckline-mark.png",
+      "description": "Deckline 图标（方形）"
+    }
+  ]
+}
