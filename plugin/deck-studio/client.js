@@ -361,9 +361,88 @@ div[data-sidebar-collapsed]{grid-template-columns:0px minmax(0px,1fr) 0px!import
         return () => window.removeEventListener("message", onMessage);
       }, "deck-studio: prompt bridge");
 
+      /**
+       * F-164：自动新建的会话要落进一个 DSH 工作区，而不是「未分组」。
+       * F-165：显式 workspacePath → 启动目录所属工作区 / 登记启动目录 → 源目录工作区 → 默认工作区。
+       * 工作区创建失败必须报错，不能悄悄建立未分组会话。
+       */
+      /** 取一个可选服务：没 inject 的服务用 ctx.xxx 直取会 throw，这里统一吞掉。 */
+      function optionalService(name) {
+        try {
+          const viaGet = ctx.get?.(name);
+          if (viaGet) return viaGet;
+        } catch {
+          /* ctx.get 不可用 */
+        }
+        try {
+          return ctx[name] ?? null;
+        } catch {
+          return null;
+        }
+      }
+
+      async function resolveSessionWorkspace(data) {
+        const workspaces = optionalService("workspaces");
+        if (!workspaces?.list?.getSnapshot || !workspaces?.create) {
+          throw new Error("工作区服务不可用，未创建会话；请检查 DSH 版本并重试");
+        }
+        await workspaces.refresh?.();
+        const items = workspaces.list.getSnapshot().items ?? [];
+        const normalize = (path) => String(path ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
+        const containing = (path) => items
+          .filter((item) => normalize(path) === normalize(item.path) || normalize(path).startsWith(`${normalize(item.path)}/`))
+          .sort((a, b) => b.path.length - a.path.length)[0];
+        const register = async (path) => {
+          const workspace = await workspaces.create({ path });
+          if (!workspace?.workspaceId) throw new Error("工作区创建未返回 workspaceId");
+          return workspace.workspaceId;
+        };
+        const configured = String(data.workspacePath ?? "").trim();
+        if (configured) return register(configured);
+        const cwd = String(data.cwd ?? "").trim();
+        if (cwd) {
+          const hit = containing(cwd);
+          if (hit) return hit.workspaceId;
+          // 不把插件安装目录或 DSH 私有数据目录登记成用户工作区。
+          const path = normalize(cwd);
+          const internal = /(^|\/)node_modules(\/|$)|(^|\/)\.dsh(\/|$)/.test(path);
+          if (path && path !== "/" && !internal) return register(cwd);
+        }
+        const sourceRoot = String(data.sourceRoot ?? "").trim();
+        const sourceWorkspace = sourceRoot ? containing(sourceRoot) : null;
+        if (sourceWorkspace) return sourceWorkspace.workspaceId;
+        const fallback = await workspaces.initializeDefault?.();
+        if (fallback?.workspaceId) return fallback.workspaceId;
+        throw new Error("无法确定启动工作区，未创建会话；请配置 workspacePath 后重试");
+      }
+
+      async function ensureConversationSession(data) {
+        const sessions = ctx.sessions;
+        if (!sessions?.create) throw new Error("sessions service unavailable");
+        const sessionId = String(data.sessionId ?? "").trim();
+        if (sessionId) {
+          await sessions.refresh?.();
+          const readPreset = () => {
+            const state = sessions.list?.getSnapshot?.();
+            const row = state?.byId?.[sessionId] || state?.items?.find((item) => (item.sessionId || item.id) === sessionId);
+            return row?.projectionValues?.agentPreset ?? row?.projections?.values?.agentPreset
+              ?? state?.projectionsBySession?.[sessionId]?.values?.agentPreset;
+          };
+          await sessions.refreshProjections?.(sessionId);
+          const preset = readPreset();
+          if (preset === "deck-studio") return sessionId;
+          if (!preset) throw new Error("无法核对会话模式，请刷新后重试；原会话已保留");
+          // 已有非空会话不能换 preset：保留原历史，另建制作会话，工作台负责追加绑定。
+        }
+        const workspaceId = await resolveSessionWorkspace(data);
+        const created = await sessions.create({ workspaceId, agentPreset: "deck-studio" });
+        if (!created) throw new Error("session create returned no id");
+        return created;
+      }
+
       /* 工作台 → 宿主：建/切会话并绑定 deck|design（F-43：每个会话必须有绑定）。
        * - action=open：切到给定 sessionId；
-       * - action=ensure：有 sessionId 就切过去；没有就 sessions.create({cwd}) 新建再切，
+       * - action=ensure：核对制作模式后复用，否则指定工作区和 Deckline preset 新建再切，
        *   然后可选地把首条 prompt 发进去（design 会话确认后「chat 开始工作」）。 */
       ctx.effect(() => {
         const onMessage = async (event) => {
@@ -377,19 +456,15 @@ div[data-sidebar-collapsed]{grid-template-columns:0px minmax(0px,1fr) 0px!import
             }
           };
           try {
-            const uiWorkspace = ctx.uiWorkspace ?? ctx.get?.("uiWorkspace");
+            const uiWorkspace = optionalService("uiWorkspace");
             if (!uiWorkspace?.openSession) throw new Error("uiWorkspace service unavailable");
             let sessionId = String(data.sessionId ?? "").trim();
-            if (data.action === "ensure" && !sessionId) {
-              const sessions = ctx.sessions;
-              if (!sessions?.create) throw new Error("sessions service unavailable");
-              // 注意：客户端 sessions.create 直接 resolve 新 sessionId，失败才 throw（不是 {ok,value}）。
-              sessionId = await sessions.create({ cwd: String(data.cwd ?? "") || undefined });
-              if (!sessionId) throw new Error("session create returned no id");
-            }
+            if (data.action === "ensure") sessionId = await ensureConversationSession(data);
             if (!sessionId) throw new Error("没有目标会话");
             if (data.action === "open" || data.action === "ensure") uiWorkspace.openSession(sessionId);
-            if (data.prompt && data.action === "ensure") await sendToSession(sessionId, String(data.prompt));
+            if (data.prompt && data.action === "ensure" && sessionId !== String(data.sessionId ?? "")) {
+              await sendToSession(sessionId, String(data.prompt));
+            }
             reply({ ok: true, sessionId });
           } catch (error) {
             ctx.logger?.warn?.("deck-studio: conversation bridge failed", error);

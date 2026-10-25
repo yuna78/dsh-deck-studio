@@ -180,6 +180,17 @@ export function mergeConfig(raw, options = {}) {
      */
     hideShellSidebar: input.hideShellSidebar === true,
     /**
+     * F-164：工作台自动新建的会话落在哪个 DSH 工作区（目录）。
+     * 留空 = 自动：先找 deck 源目录所在工作区，再找宿主 cwd 工作区，再退回 DSH 默认工作区；
+     * 填了就把这个目录登记/复用一个工作区，会话固定落在那里（不再出现「未分组」）。
+     */
+    workspacePath: expandHome(
+      typeof input.workspacePath === "string" && input.workspacePath.trim()
+        ? input.workspacePath.trim()
+        : (env.DSH_DECK_WORKSPACE_PATH ?? ""),
+      env,
+    ),
+    /**
      * 新建 Deck 弹窗默认预选的登记风格（F-112）：填 design 缩写（如 GRD）。
      * 留空 = 不预选。只在 UI 预选，不改变任何已有 deck 的关联风格。
      */

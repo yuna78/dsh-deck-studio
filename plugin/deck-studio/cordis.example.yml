@@ -16,6 +16,9 @@
     # dataRoot: '~/.dsh/deckline'
     # 可选：默认收起 DSH 外壳左侧栏（只建议在专门的产品 profile 里开；默认 false）
     hideShellSidebar: true   # 收起 DSH 外壳左侧栏（工作区/会话）；不想收就改 false
+    # F-164：工作台自动新建的会话落在哪个 DSH 工作区。留空 = 自动：
+    # 宿主启动目录所属工作区（没有则登记）→ deck 源目录所在工作区 → DSH 默认工作区。
+    # workspacePath: '~/Documents/我的 deck'
     bootstrap: true          # 首次启动自动登记示例 deck / 资源库 / 预设风格
     userName: ''  # 留空 = 首页只显示「欢迎你」
     # 新建 deck 的落盘根；留空 = 插件数据目录 .deck/projects/<id>/source

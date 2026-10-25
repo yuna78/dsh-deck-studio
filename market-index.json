@@ -80,13 +80,13 @@
           "dsh-plugin"
         ],
         "sortKeys": {
-          "published": 1792899000
+          "published": 1792909443
         }
       },
       "versions": [
         {
-          "version": "0.2.4",
-          "publishTimestamp": 1792899887,
+          "version": "0.2.5",
+          "publishTimestamp": 1792909443,
           "source": {
             "type": "npm",
             "registry": "https://registry.npmmirror.com"

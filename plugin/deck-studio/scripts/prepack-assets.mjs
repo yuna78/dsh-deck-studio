@@ -23,7 +23,6 @@ const DOC_FILES = [
   "styles.md", "styles.en.md",
   "sample-deck.md", "sample-deck.en.md",
   "compat.md",
-  "productization.md", "productization.en.md",
 ];
 
 function copyDocs() {

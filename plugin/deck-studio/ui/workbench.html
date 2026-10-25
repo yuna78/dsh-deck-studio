@@ -1411,14 +1411,30 @@ async function fetchDoc(docId) {
   if (STATE.docCache[docId]) return STATE.docCache[docId];
   if (STATE.docLoading === docId) return null;
   STATE.docLoading = docId;
+  const deckId = STATE.data?.active?.deckId ?? "";
+  // F-163：加载失败必须可见。以前只 throw，中间的 spinner 永远不停，用户不知道是 404、500 还是超时。
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 15000) : null;
   try {
-    const deckId = STATE.data.active.deckId;
-    const res = await fetch(`/api/deck-studio.doc?` + new URLSearchParams({ deckId, docId }));
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    const doc = await res.json();
-    if (doc.ok) STATE.docCache[docId] = doc;
+    const res = await fetch(
+      `/api/deck-studio.doc?` + new URLSearchParams({ deckId, docId }),
+      controller ? { signal: controller.signal } : undefined,
+    );
+    const text = await res.text();
+    let doc = null;
+    try { doc = JSON.parse(text); } catch { doc = null; }
+    if (!res.ok || !doc || doc.ok === false) {
+      const detail = doc?.error?.message || text.replace(/\s+/g, " ").trim().slice(0, 200) || res.statusText;
+      throw new Error(`${res.status} · ${detail}`);
+    }
+    STATE.docCache[docId] = doc;
     return doc;
+  } catch (error) {
+    const message = error?.name === "AbortError" ? "请求超时（15 秒没有响应）" : String(error?.message ?? error);
+    console.warn(`[deck-studio] 读取文档失败 docId=${docId} deckId=${deckId}：${message}`);
+    return { ok: false, docId, error: { message } };
   } finally {
+    if (timer) clearTimeout(timer);
     STATE.docLoading = null;
   }
 }
@@ -1430,6 +1446,18 @@ async function renderDocTab(docId) {
   if (!cached) view.innerHTML = `<div class="observe-body"><div class="doc-loading">读取 ${esc(index?.label ?? docId)} …</div></div>`;
   const doc = cached ?? (await fetchDoc(docId));
   if (!doc || STATE.tab !== docId) return; // 加载期间用户已切走
+  if (doc.ok === false) {
+    view.innerHTML = `<div class="observe-body">
+      <div class="doc-loading">读取「${esc(index?.label ?? docId)}」失败：${esc(doc.error?.message || "未知错误")}</div>
+      <p style="text-align:center;margin-top:10px"><button type="button" class="btn" data-doc-retry="${esc(docId)}">重试</button></p>
+      <p class="small" style="text-align:center">先在终端看服务端日志；若一直失败，把上面这行错误发我。</p>
+    </div>`;
+    view.querySelectorAll("[data-doc-retry]").forEach((btn) => btn.addEventListener("click", () => {
+      STATE.docCache[docId] = null;
+      renderDocTab(docId);
+    }));
+    return;
+  }
   view.innerHTML = `<div class="observe-body">${renderDoc(doc, index)}</div>`;
   bindDocActions(view);
 }
@@ -2780,15 +2808,19 @@ async function ensurePromptConversation() {
   if (!target) return;
   const bound = chatSessionsForTarget(target);
   if (bound.length) {
-    const current = currentChatSessionId();
-    if (bound.some((session) => session.sessionId === current)) return;
-    await openBoundConversation(bound[0].sessionId);
+    // 发送操作也要核对 preset，不能只因绑定存在就向标准模式发制作指令。
+    const result = target.kind === "deck"
+      ? await ensureDeckConversation(target.id)
+      : await openDesignProject(target.id);
+    if (!result?.ok) throw new Error(result?.reason || "无法打开 Deckline 制作会话");
     await new Promise((resolve) => setTimeout(resolve, 250));
     return;
   }
   const active = STATE.data?.active;
-  if (active?.kind === "design-canvas") await openDesignProject(active.designId);
-  else if (active?.deckId) await ensureDeckConversation(active.deckId);
+  const result = active?.kind === "design-canvas"
+    ? await openDesignProject(active.designId)
+    : active?.deckId ? await ensureDeckConversation(active.deckId) : null;
+  if (!result?.ok) throw new Error(result?.reason || "无法打开 Deckline 制作会话");
   await new Promise((resolve) => setTimeout(resolve, 250));
 }
 
@@ -2809,6 +2841,8 @@ async function sendAgentPrompt() {
     }
     state.textContent = "已发送到左侧对话 ✓";
     setTimeout(closeAgentPrompt, 900);
+  } catch (error) {
+    state.textContent = `未能发送：${error?.message || error}`;
   } finally {
     button.disabled = false;
   }
@@ -3788,7 +3822,14 @@ function requestConversation(payload) {
       resolve({ ok: Boolean(event.data.ok), sessionId: event.data.sessionId || "", reason: event.data.reason || "" });
     };
     window.addEventListener("message", onAck);
-    target.postMessage({ type: "dsh-deck-studio:conversation", requestId, cwd: STATE.data?.cwd || "", ...payload }, "*");
+    target.postMessage({
+      type: "dsh-deck-studio:conversation",
+      requestId,
+      cwd: STATE.data?.cwd || "",
+      workspacePath: STATE.data?.workspacePath || "",
+      sourceRoot: STATE.data?.active?.sourceRoot || "",
+      ...payload,
+    }, "*");
     setTimeout(() => {
       if (settled) return;
       cleanup();
@@ -3850,14 +3891,17 @@ async function ensureDeckConversation(deckId) {
   const chosen = bound[0] || null;
   const binding = chosen ? { sessionId: chosen.sessionId } : null;
   const result = await requestConversation({
-    action: chosen ? "open" : "ensure",
+    action: "ensure",
     sessionId: chosen?.sessionId || "",
     kind: "deck",
     id: deckId,
     title: label,
-    prompt: chosen ? "" : `本对话绑定 deck ${deckId}（${label}）。后续所有修改都在这个 deck 上进行；先读 intent 与 script 概要，等我的指令，不要直接出图。`,
+    prompt: `本对话绑定 deck ${deckId}（${label}）。后续所有修改都在这个 deck 上进行；先读 intent 与 script 概要，等我的指令，不要直接出图。`,
   });
-  if (!result.ok) return result;
+  if (!result.ok) {
+    getEl("chatBindChip").textContent = `会话打开失败：${result.reason || "未知原因"}`;
+    return result;
+  }
   if (!binding || binding.sessionId !== result.sessionId) {
     await bindConversation({ sessionId: result.sessionId, kind: "deck", id: deckId, title: label });
   }
@@ -3872,25 +3916,28 @@ async function openDesignProject(designId) {
   const project = (STATE.data?.designProjects || []).find((item) => item.designId === designId);
   if (!project) return;
   showDeck(project.canvasDeckId);
-  const binding = bindingOf("design", designId);
+  const target = chatTargetForBinding({ kind: "design", id: designId });
+  const binding = chatSessionsForTarget(target)[0] || null;
   const title = `风格 · ${project.name}`;
   const result = await requestConversation({
-    action: binding ? "open" : "ensure",
+    action: "ensure",
     sessionId: binding?.sessionId || "",
     kind: "design",
     id: designId,
     title,
-    prompt: binding ? "" : buildDesignPrompt(project, project.canvasDeckId),
+    prompt: buildDesignPrompt(project, project.canvasDeckId),
   });
   if (result.ok && (!binding || binding.sessionId !== result.sessionId)) {
     await bindConversation({ sessionId: result.sessionId, kind: "design", id: designId, title });
   } else if (!result.ok) {
     STATE.lastConvError = result.reason || "未知原因";
+    getEl("chatBindChip").textContent = `会话打开失败：${STATE.lastConvError}`;
   }
   if (result.ok) {
     STATE.chatSessionId = result.sessionId;
     renderChatHeader();
   }
+  return result;
 }
 
 /** Conversations 页点会话：切过去，并把工作台切到它绑定的 deck / design 画布。 */

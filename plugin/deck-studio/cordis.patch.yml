@@ -12,6 +12,10 @@
         userName: ''  # 留空 = 首页只显示「欢迎你」；填了就显示「XX，欢迎你」
         # F-157：产品默认收起 DSH 外壳左侧栏（工作区/会话那栏），要保留就改 false。
         hideShellSidebar: true
+        # F-164：工作台自动新建的会话落在哪个 DSH 工作区（目录）。
+        # 留空 = 自动：宿主启动目录所属工作区（没有则登记）→ deck 源目录所在工作区 → DSH 默认工作区。
+        # 想固定就填绝对路径（如 '~/Documents/我的 deck'），会自动登记成工作区。
+        # workspacePath: ''
         # F-157：首次启动自动登记示例 deck / 拷资源库 / 导入 8 个预设风格；不想要就改 false。
         bootstrap: true
         # 新建 deck 落盘根：留空 = 插件数据目录 .deck/projects/<id>/source

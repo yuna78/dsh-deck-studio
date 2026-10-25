@@ -1705,6 +1705,7 @@ export function createService(config, logger, env = process.env) {
       uiVersion: uiVersion(),
       displayName: config.displayName,
       hideShellSidebar: config.hideShellSidebar === true,
+      workspacePath: config.workspacePath,
       dataRoot: config.dataRoot,
       toolsMounted: config.tools,
       renderMode: config.render.mode,
@@ -1968,7 +1969,10 @@ export function createService(config, logger, env = process.env) {
     }
     return {
       ...base,
-      cwd: repoRootFrom(PLUGIN_DIR),
+      // F-164：会话默认落在哪个目录 / 工作区。npm 布局下 repoRootFrom 会退到插件包内的 seeds/，
+      // 不能拿来当会话 cwd（会落到「未分组」）。优先显式配置的 workspacePath，否则用宿主启动目录。
+      cwd: config.workspacePath || process.cwd(),
+      workspacePath: config.workspacePath,
       config: {
         preset: "deck-studio",
         renderMode: config.render.mode,
@@ -2273,9 +2277,16 @@ export function apply(ctx, rawConfig) {
     const url = new URL(request?.url ?? "/", "http://localhost");
     const deckId = url.searchParams.get("deckId") ?? "";
     const docId = url.searchParams.get("docId") ?? "";
-    const doc = service.deckDoc(deckId, docId);
-    if (!doc) return json({ ok: false, error: { message: "unknown deck or doc" } }, 404);
-    return json({ ok: true, deckId, ...doc });
+    // F-163：读取失败要把真实原因吐给前端，不能 500 空手而归（前端以前会一直转圈）。
+    try {
+      const doc = service.deckDoc(deckId, docId);
+      if (!doc) return json({ ok: false, error: { message: `unknown deck or doc：deckId=${deckId || "(空)"} docId=${docId || "(空)"}` } }, 404);
+      return json({ ok: true, deckId, ...doc });
+    } catch (error) {
+      const message = String(error?.message ?? error);
+      logger?.warn?.(`deck-studio.doc 读取失败 deckId=${deckId} docId=${docId}：${message}`);
+      return json({ ok: false, error: { message } }, 500);
+    }
   });
 
   registerRoute(ROUTES.docfile, (request) => {
