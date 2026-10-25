@@ -37,8 +37,8 @@ Designs 页 → **＋ 导入预设风格**：一次导入下面 8 个风格（�
 
 ### 方式 2：直接放文件
 
-把图片放进 `designs/<ABBR>/` 目录（画布目录 `.deck/projects/<canvasDeckId>/source/designs/<ABBR>/`，
-或任何受控 deck 源里的 `designs/<ABBR>/`）。支撑 png / jpg / webp，刷新页面即可。
+把图片放进 `designs/<ABBR>/` 目录（画布目录 `<dataRoot>/projects/<canvasDeckId>/source/designs/<ABBR>/`，
+插件也会只读扫描已有源目录中的 `designs/<ABBR>/`）。新增样张优先通过画布上传，避免修改受控源。支持 png / jpg / webp，刷新页面即可。
 
 `style.json` 的字段（插件也会自动写一份）：
 
@@ -94,7 +94,7 @@ node scripts/f74-regenerate-presets.mjs --only=BIZ --limit=1
 ```
 
 脚本做的事：把 `seeds/styles/<ABBR>.json` 的 `styleBrief` 同步进线上 design 的 `style.json` →
-旧样张备份到 `.deck/tmp/f74-old-samples/<ABBR>/` → 按 `baselineBriefs` 逐张出图（prompt 落 `samples.jsonl`）→
+旧样张备份到 `<dataRoot>/tmp/f74-old-samples/<ABBR>/` → 按 `baselineBriefs` 逐张出图（prompt 落 `samples.jsonl`）→
 预览回写 `seeds/samples/`。重制后刷新 Designs 页即可看到新样张；不用重启服务。
 
 > 样张里的文字是示意（图像模型会糊字），不承诺逐字复刻；也不要把真实客户资料、品牌 logo 放进样例图。

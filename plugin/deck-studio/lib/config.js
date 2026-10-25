@@ -152,8 +152,8 @@ export function mergeConfig(raw, options = {}) {
         env,
       ) || defaultDataRoot(env),
     /**
-     * 新建 deck 项目的落盘根（2026-10-21 负责人：以后写的 deck 都放
-     * `00_company/sharing/`）。留空 = 旧的内部 `.deck/projects/<id>/source`。
+     * 新建 deck 项目的落盘根。留空 = <dataRoot>/projects/<id>/source。
+     * 与会话 workspacePath 独立；默认数据根不在插件安装目录内。
      * 配置了这个根时，新项目直接建在 `<projectsRoot>/<目录名>/`
      * （script.md / intent.md / style-reference.md / prompts/ 同层，和已有 deck 源结构一致）。
      */

@@ -77,16 +77,18 @@ The minimum (append to the profile's `cordis.patch.yml`):
   config:
     displayName: 'Deckline'
     userName: 'Yuna'
-    # where new decks are created; empty = the plugin's internal .deck/projects/<id>/source
-    projectsRoot: '/absolute/path/to/your/sharing'
+    # root for new deck source files; empty = <dataRoot>/projects/<deck-id>/source
+    projectsRoot: '/absolute/path/to/your/decks'
+    # workspacePath: '/absolute/path/to/your/workspace'  # DSH chat workspace, not storage
     decks:
       - id: my-deck
         label: 'My deck'
         sourceRoot: '/absolute/path/to/my-deck'
 ```
 
-> `decks[].sourceRoot` is read-only: Deckline never writes to the source directory; all edits and
-> revisions live in `.deck/`. You can also start with **＋ New Deck** if you have no deck yet.
+> `decks[].sourceRoot` is a managed source and always read-only: Deckline never writes to it; working copies,
+> revisions and renders live under `dataRoot`. A locally created deck is different: after user confirmation,
+> script / intent source files may be written back to that local project directory. You can also start with **＋ New Deck** if you have no deck yet.
 
 ### Per-deck project rules (optional)
 
@@ -125,14 +127,15 @@ creating a deck, check this table first.
 - **`dataRoot` defaults to `$DSH_HOME/deckline`** (usually `~/.dsh/deckline`) — never inside the plugin
   package, so plugin upgrades do not touch it. Override with `dataRoot: '/your/path'` in the profile patch,
   or the `DSH_DECK_DATA_ROOT` env var.
-- **`projectsRoot`** decides where new decks are created; if unset they go to `<dataRoot>/projects/<deckId>/source`.
-- **Managed source decks are read-only**: Deckline never writes to a deck registered via `decks[].sourceRoot`.
+- **`projectsRoot`** decides where locally created deck source files live; if unset they go to `<dataRoot>/projects/<deckId>/source`. It does not select the chat workspace.
+- **`workspacePath`** selects the DSH workspace used for conversation binding; it is independent of `projectsRoot` / `dataRoot`. If unset, Deckline resolves it from the startup and source directories.
+- **Managed source decks are read-only**: Deckline never writes to a deck registered via `decks[].sourceRoot`; a confirmed local deck may write back to its own source files.
 - **Backup**: archive `dataRoot` and `projectsRoot` together (documents + images + events):
   ```sh
   tar czf deckline-backup-$(date +%Y%m%d).tgz "$DSH_HOME/deckline" "<your projectsRoot>"
   ```
-- The workbench **Settings** panel shows the current data directory; a dev profile may point `dataRoot` at
-  a directory inside the source tree (e.g. `.deck/`) explicitly.
+- The workbench **Settings** panel shows the current data directory; keep `dataRoot` outside the source tree
+  in normal installs so runtime data is portable and plugin upgrades cannot overwrite it.
 
 ## 3. Start
 
@@ -216,7 +219,7 @@ bottom of the preview (paste / pick files work the same way).
 
 Samples live under `designs/<ABBR>/` (ABBR is your style abbreviation):
 
-- canvas directory (recommended): `.deck/projects/<canvasDeckId>/source/designs/<ABBR>/`;
+- canvas directory (recommended): `<dataRoot>/projects/<canvasDeckId>/source/designs/<ABBR>/`;
 - or `designs/<ABBR>/` inside any managed deck source (Deckline scans and merges them).
 
 Refresh the page afterwards. png / jpg / webp are supported; names are free-form
@@ -235,7 +238,7 @@ Swiss minimal / aurora gradient), each with samples. See [styles.md](styles.md).
 | Port already in use | `dsh --profile deckline --port 13100`; or kill the old process with `lsof -tiTCP:13090 -sTCP:LISTEN` |
 | Page 404 / blank | Make sure the plugin bundle is enabled: `dsh --profile deckline --dump-config \| grep deck-studio` |
 | No "render" button / render fails | Check the key state in Settings; confirm `render.mode: real`; `curl` the node endpoint |
-| New decks land in the wrong place | Set `projectsRoot`; otherwise they go to the plugin data directory `.deck/projects/` |
+| New decks land in the wrong place | Set `projectsRoot`; otherwise they go to `<dataRoot>/projects/` (by default `<DSH_HOME>/deckline/projects/`) |
 | Where are data / samples | See section 2.5: source decks in `projectsRoot`, working copies / renders in `dataRoot` (default `~/.dsh/deckline`) |
 | Upgrading the plugin | `dsh plugin --profile deckline install <spec>`, or `add` the new version again |
 

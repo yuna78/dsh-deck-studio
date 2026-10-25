@@ -365,9 +365,8 @@ export function createService(config, logger, env = process.env) {
     const pad = (n) => String(n).padStart(2, "0");
     const now = new Date();
     const id = `deck-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}-${Math.random().toString(36).slice(2, 6)}`;
-    // 新建 deck 的去处（负责人 2026-10-21）：配置了 projectsRoot 就落在共享根
-    // （`00_company/sharing/<目录名>/`，和已有 deck 源结构一致）；不配则沿用旧的
-    // 内部 `.deck/projects/<id>/source`。design 空白画布始终走内部数据目录。
+    // 配置 projectsRoot 时落在 <projectsRoot>/<目录名或id>/；否则使用
+    // <dataRoot>/projects/<id>/source。design 空白画布始终走数据目录。
     const projectsRoot = blank ? "" : String(config.projectsRoot ?? "").trim();
     const slug = blank ? "" : normalizeDeckSlug(payload.dirName);
     let sourceRoot;
@@ -1980,6 +1979,7 @@ export function createService(config, logger, env = process.env) {
         renderEndpoint: config.render.endpoint,
         renderSize: config.render.size,
         dataRoot: config.dataRoot,
+        projectsRoot: config.projectsRoot,
         displayName: config.displayName,
         hideShellSidebar: config.hideShellSidebar === true,
         defaultStyleAbbr: config.defaultStyleAbbr,

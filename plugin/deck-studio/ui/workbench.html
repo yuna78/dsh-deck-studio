@@ -130,7 +130,7 @@
       <button class="modal-close" id="ndClose" title="关闭">✕</button>
     </div>
     <form class="modal-body newdeck-body" id="newDeckForm">
-      <p class="nd-tip">先定「讲给谁、讲什么、想带走什么」+ 视觉风格。创建后会开出源目录与 9 份文档骨架（新项目落在 <code>00_company/sharing/&lt;目录名&gt;/</code>），然后在对话里继续补资料、改 script，直到可以出图。</p>
+      <p class="nd-tip">先定「讲给谁、讲什么、想带走什么」+ 视觉风格。创建后会开出源目录与 9 份文档骨架，然后在对话里继续补资料、改 script，直到可以出图。<br>新项目保存位置：<code id="ndStoragePath">正在读取配置…</code>。<span id="ndStorageNote"></span></p>
       <label class="field"><span>主题 / 标题</span><input id="ndTitle" required placeholder="例：XX 业务场景的 AI 落地分享"></label>
       <label class="field"><span>项目目录名（可选，英文小写中划线；留空自动生成）</span><input id="ndDirName" placeholder="例：talk-ai-transformation-6-stages"></label>
       <label class="field"><span>页数（占位页 1–40；创建后还能在对话里追加）</span><input id="ndPages" type="number" min="1" max="40" inputmode="numeric" value="6"></label>
@@ -3468,11 +3468,23 @@ function renderDeckStyleChoices() {
   }
 }
 
+function newDeckStorageInfo(config = {}) {
+  const root = String(config?.projectsRoot || "").trim();
+  const dataRoot = String(config?.dataRoot || "").trim();
+  const append = (base, suffix) => `${base.replace(/[\\/]+$/, "")}/${suffix}`;
+  if (root) return { path: append(root, "<目录名或自动生成的 deck-id>/"), note: "由 profile 的 projectsRoot 配置；与会话工作区独立。" };
+  if (dataRoot) return { path: append(dataRoot, "projects/<deck-id>/source/"), note: "未配置 projectsRoot，使用插件数据目录；不会自动保存在当前工作区。" };
+  return { path: "暂时无法确定", note: "请等待工作台配置加载后重试；未配置 projectsRoot 时使用 <dataRoot>/projects/<deck-id>/source/。" };
+}
+
 function openNewDeckModal() {
   // F-112：profile 里配了 defaultStyleAbbr 就默认预选这个风格（用户仍可改/取消）。
   STATE.ndStyleAbbr = String(STATE.data?.config?.defaultStyleAbbr || "");
   getEl("newDeckForm").reset();
   getEl("ndState").textContent = "";
+  const storage = newDeckStorageInfo(STATE.data?.config);
+  getEl("ndStoragePath").textContent = storage.path;
+  getEl("ndStorageNote").textContent = storage.note;
   getEl("newDeckModal").hidden = false;
   renderDeckStyleChoices();
   setTimeout(() => getEl("ndTitle").focus(), 30);

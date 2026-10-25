@@ -21,7 +21,7 @@
     # workspacePath: '~/Documents/我的 deck'
     bootstrap: true          # 首次启动自动登记示例 deck / 资源库 / 预设风格
     userName: ''  # 留空 = 首页只显示「欢迎你」
-    # 新建 deck 的落盘根；留空 = 插件数据目录 .deck/projects/<id>/source
+    # 新建 deck 的落盘根；留空 = <dataRoot>/projects/<id>/source
     projectsRoot: '/absolute/path/to/your/sharing'
     # 只读引用的 deck 源（可加多个）
     decks:
@@ -123,7 +123,7 @@
               按返回步骤回答，按当前界面口径说；没命中就说这块没覆盖到，指路 README / docs/manual.md，不要凭记忆编界面。
             - 状态以本轮工具返回为准：别引用上文的旧 proposalId / 旧字段值；工具说没有待确认提案就直接继续，不要让我去点一个不存在的提案。
           suffix: |
-            你的工作目录是本 deck 仓库的根目录（以工具返回的绝对路径为准）；deck 数据落在该仓库的 .deck/ 下（已 gitignore）。
+            以工具返回的 sourceRoot / dataRoot 绝对路径为准，不假设当前仓库就是 deck 源目录。新建 deck 使用 projectsRoot；未配置时源文件在 <dataRoot>/projects/<id>/source，版本与事件在 dataRoot；受控源只读。
 
       - id: deck-studio-tools
         name: 'dsh-plugin-deck-studio'

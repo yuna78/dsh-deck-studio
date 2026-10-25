@@ -14,7 +14,7 @@
 - **直接播放**：工作台一键全屏演示，方向键翻页、Esc 退出，不必先导出 PPT；
 - **8 个内置风格模板 + 模板管理**：预览样张、创建自己的风格、补充参考图、在不同 deck 间复用；
 - **资料多也能读**：≥5 份参考资料时先规划调研批次、逐批读摘要，可引用事实随时落调研台账（不一次读完占满上下文）；
-- 源 deck 目录**只读**，所有编辑产物落在本地 `.deck/`（已 gitignore，不进仓库）。
+- **数据位置可配置**：运行数据默认落在 `$DSH_HOME/deckline`（通常 `~/.dsh/deckline`）；受控源 deck 只读，本机新建 deck 在用户确认后可回写其源文件。
 
 ![Deckline 工作台：整页图片 storyboard](docs/assets/screenshots/00-hero.png)
 
@@ -90,7 +90,7 @@ dsh --profile deckline --port 13090
 两种方式，任选：
 
 1. **界面里配**（推荐，保存即生效、不用重启）：进任意 deck → 右栏 **设置** → 填 endpoint / 模型 /
-   key 环境变量名（或 key 文件路径）/ 尺寸 → **保存并生效**。写在 `.deck/render-settings.json`
+   key 环境变量名（或 key 文件路径）/ 尺寸 → **保存并生效**。写在 `<dataRoot>/render-settings.json`
    （本机数据目录，已 gitignore，0600）：节点可直存 key（界面只显示「已保存」、不回显），也可用变量名 / key 文件。
 2. **profile patch**（适合团队统一分发）：`~/.dsh/profiles/deckline/cordis.patch.yml`。
 可直接抄仓库里的 [`plugin/deck-studio/cordis.example.yml`](plugin/deck-studio/cordis.example.yml)。
@@ -102,7 +102,8 @@ dsh --profile deckline --port 13090
     displayName: 'Deckline'
     hideShellSidebar: true        # 可选：这个 profile 里默认收起 DSH 左侧栏（默认 false）
     userName: '你的名字'
-    projectsRoot: '/absolute/path/to/your/sharing'   # 新建 deck 落盘根
+    projectsRoot: '/absolute/path/to/your/decks'     # 新建 deck 源文件的落盘根
+    # workspacePath: '/absolute/path/to/your/workspace' # 会话绑定的 DSH 工作区（与保存位置无关）
     decks:                                            # 只读引用的 deck 源
       - id: my-deck
         label: '我的 deck'
@@ -132,7 +133,7 @@ export DSH_DECK_IMAGE_API_KEY="sk-…"   # key 只放环境变量 / 本机 key �
 ```
 
 工作台「设置」面板会显示节点与 **key 是否配置**（只显示布尔值，不回显 key）。
-设置页保存过的值优先于 profile（`.deck/render-settings.json` 覆盖 `config.render`）。
+设置页保存过的值优先于 profile（`<dataRoot>/render-settings.json` 覆盖 `config.render`）。
 
 ## 用起来
 

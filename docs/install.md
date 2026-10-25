@@ -111,15 +111,17 @@ Deckline 的配置都在 **profile patch 层**：`~/.dsh/profiles/deckline/cordi
   config:
     displayName: 'Deckline'
     userName: ''            # 留空 = 首页只显示「欢迎你」；填了就显示「XX，欢迎你」
-    # 新建 deck 落盘根：留空 = 插件内部 .deck/projects/<id>/source
-    projectsRoot: '/absolute/path/to/your/sharing'
+    # 新建 deck 源文件根：留空 = <dataRoot>/projects/<deck-id>/source
+    projectsRoot: '/absolute/path/to/your/decks'
+    # workspacePath: '/absolute/path/to/your/workspace'  # DSH 会话工作区，不是保存位置
     decks:
       - id: my-deck
         label: '我的 deck'
         sourceRoot: '/absolute/path/to/my-deck'
 ```
 
-> `decks[].sourceRoot` 只读：Deckline 永远不写源目录，编辑产物和版本都在 `.deck/` 里。
+> `decks[].sourceRoot` 是受控源，始终只读：Deckline 不会写入它；编辑工作副本、版本和出图落在 `dataRoot`。
+> 通过「＋ 新建 Deck」创建的本机 deck 是另一种情况：用户确认后，script / intent 等源文件可以回写到该本机项目目录。
 > 没有现成 deck 也可以先用「＋ 新建 Deck」建一个。
 
 ### 每个 deck 的项目规则（可选）
@@ -155,13 +157,14 @@ Deckline 的数据分两处：**你的 deck 源**（`projectsRoot`，纯 md + �
 
 - **`dataRoot` 默认 `$DSH_HOME/deckline`**（通常是 `~/.dsh/deckline`）——不在插件包里，升级插件不会覆盖；
   可在 profile patch 配 `dataRoot: '/your/path'`，或环境变量 `DSH_DECK_DATA_ROOT` 覆盖。
-- **`projectsRoot`** 决定新建 deck 落在哪；不配置时落在 `<dataRoot>/projects/<deckId>/source`。
-- **受控源 deck 只读**：`decks[].sourceRoot` 指向的已有 deck 目录，插件永远不写。
+- **`projectsRoot`** 决定本机新建 deck 的源文件落在哪；不配置时落在 `<dataRoot>/projects/<deckId>/source`。它不决定聊天会话绑定的工作区。
+- **`workspacePath`** 只决定会话绑定哪个 DSH workspace，与 `projectsRoot` / `dataRoot` 相互独立；未配置时插件按启动目录和源目录自动选择工作区。
+- **受控源 deck 只读**：`decks[].sourceRoot` 指向的已有 deck 目录，插件永远不写；本机新建 deck 在用户确认后可回写自己的源文件。
 - **备份**：把 `dataRoot` 和 `projectsRoot` 一起打包即可（文档 + 图 + 事件都在里面）：
   ```sh
   tar czf deckline-backup-$(date +%Y%m%d).tgz "$DSH_HOME/deckline" "<你的 projectsRoot>"
   ```
-- 工作台「设置」面板会显示当前数据目录；本仓库开发时数据根在仓库 `.deck/`（profile 里显式配置）。
+- 工作台「设置」面板会显示当前数据目录；开发环境也建议使用独立的 `dataRoot`，不要把运行数据写进仓库。
 - **preset 工具实例要和根挂载用同一个数据根**（F-98）：DSH 面板路由与 Agent 工具是两个实例，根挂载里覆盖了
   `dataRoot` / `projectsRoot` 时，preset 的 `deck-studio-tools` 也要写同一组值（推荐 YAML 锚点），
   否则新建 deck 只进一边的注册表，Agent 会报「未知 deck：…」。
@@ -194,7 +197,7 @@ Deckline 支持：
 3. 填：**模式**（fake / real）、**生图节点 endpoint**、**模型**、**key 环境变量名**（或 **key 文件路径**）、**出图尺寸**；
 4. 点 **保存并生效**。
 
-保存后写入本机数据目录 `~/.dsh/deckline/render-settings.json`（开发调试时也可用 profile 显式配 `dataRoot`，例如仓库内 `.deck/`；
+保存后写入本机数据目录 `<dataRoot>/render-settings.json`（默认 `~/.dsh/deckline/render-settings.json`；
 已 gitignore）：节点可直存 API key（0600，界面只显示「已保存」，payload 不回显），也可改用变量名 / key 文件；
 下次启动自动生效，并覆盖 profile 里的 render 配置。
 
@@ -252,7 +255,7 @@ export DSH_DECK_IMAGE_API_KEY="sk-…"          # 只放在你的 shell / 密钥
 - 没配 key / 仍是 fake 模式时，设置面板会直接给出提示。
 - 模型名填你的中转实际开放的模型；常见 OpenAI 兼容名 `gpt-image-2` 系列的模型 id 以节点 `/v1/models` 为准。
 - 工作台「设置 → 出图节点」可以直接切换线路，也能**新增 / 编辑 / 删除节点**：填 名称 + 接口地址 + API Key +
-  模型名即可（key 存本机 `.deck/render-settings.json`，0600，不进 git；也可改用 env / key 文件）；
+  模型名即可（key 存本机 `<dataRoot>/render-settings.json`，0600，不进 git；也可改用 env / key 文件）；
   切换写当前 deck 的 `render-selection.json`，下一次出图生效，不用重启。
 - **修图**（`deck_image_edit`）需要节点支持 `POST /v1/images/edits`（multipart：`image` + `prompt` + `size` + `model`）。
   回车节点通常和出图同源；不填 `editEndpoint` 就按上面的规则派生，派生不出来（自定义路径）时工具会明确报错、不猜地址。
@@ -273,7 +276,7 @@ export DSH_DECK_IMAGE_API_KEY="sk-…"          # 只放在你的 shell / 密钥
 
 样张存在 `designs/<ABBR>/` 下（ABBR 是你的风格缩写）：
 
-- 画布目录（推荐）：`.deck/projects/<canvasDeckId>/source/designs/<ABBR>/`；
+- 画布目录（推荐）：`<dataRoot>/projects/<canvasDeckId>/source/designs/<ABBR>/`；
 - 或任何受控 deck 源里的 `designs/<ABBR>/`（Deckline 会自动扫描并合并展示）。
 
 放完刷新页面即可。支持 png / jpg / webp；命名随意（`sample-01.jpg` 之类便于排序）。
@@ -290,7 +293,7 @@ Designs 页 **＋ 导入预设风格** 会一次导入 8 个自带风格（商�
 | 端口被占 | `dsh --profile deckline --port 13100`；或 `lsof -tiTCP:13090 -sTCP:LISTEN` 杀掉旧进程 |
 | 页面 404 / 白屏 | 确认插件组合包已启用：`dsh --profile deckline --dump-config \| grep deck-studio` |
 | 没有「生图」按钮 / 出图失败 | 设置面板看 key 是否配置；确认 `render.mode: real`；节点 endpoint 可 `curl` 通 |
-| 新 deck 目录落错位置 | 配 `projectsRoot`；否则落在插件数据目录 `.deck/projects/` |
+| 新 deck 目录落错位置 | 配 `projectsRoot`；否则落在 `<dataRoot>/projects/`（默认 `<DSH_HOME>/deckline/projects/`） |
 | 数据 / 样张在哪 | 见 §2.5：源 deck 在 `projectsRoot`，工作副本 / 出图在 `dataRoot`（默认 `~/.dsh/deckline`） |
 | 升级插件 | `dsh plugin --profile deckline install <spec>`，或重新 `add` 新版本 |
 

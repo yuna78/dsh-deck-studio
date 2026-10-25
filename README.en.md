@@ -20,7 +20,7 @@ It turns "who is this for, what do we say, how do we draw it" into a traceable p
 - Images are rendered **one slide at a time**; each slide keeps its prompt, image, revisions, QA and events;
 - **Present immediately**: fullscreen playback, arrow-key navigation and Esc to exit — no export required;
 - **8 built-in style templates + template management**: preview samples, create your own designs and reuse them across decks;
-- The source deck directory is **read-only**; all edits land in the local `.deck/` workspace (gitignored, never committed).
+- **Configurable storage**: runtime data defaults to `$DSH_HOME/deckline` (usually `~/.dsh/deckline`); managed source decks are read-only, while a confirmed local deck may write back to its source files.
 
 > A sample deck built with Deckline itself: [docs/sample-deck.md](docs/sample-deck.md) (Chinese).
 
@@ -81,7 +81,7 @@ See the [style guide](docs/styles.en.md) and [user manual](docs/manual.en.md) fo
 
 ## Configuration
 
-Everything is configured in the **profile patch**: `~/.dsh/profiles/deckline/cordis.patch.yml`.
+Everything is configured in the **profile patch**: `~/.dsh/profiles/deckline/cordis.patch.yml`. `dataRoot` defaults to `$DSH_HOME/deckline` (usually `~/.dsh/deckline`); `projectsRoot` controls local deck source files, while `workspacePath` only controls DSH conversation workspace binding.
 Copy the template at [`plugin/deck-studio/cordis.example.yml`](plugin/deck-studio/cordis.example.yml).
 
 ```yaml
@@ -91,7 +91,8 @@ Copy the template at [`plugin/deck-studio/cordis.example.yml`](plugin/deck-studi
     displayName: 'Deckline'
     hideShellSidebar: true        # optional: collapse the DSH sidebar in this profile (default false)
     userName: 'your-name'
-    projectsRoot: '/absolute/path/to/your/sharing'   # where new decks are created
+    projectsRoot: '/absolute/path/to/your/decks'     # root for new deck source files
+    # workspacePath: '/absolute/path/to/your/workspace' # DSH chat workspace binding, not storage
     decks:                                            # read-only source decks
       - id: my-deck
         label: 'My deck'

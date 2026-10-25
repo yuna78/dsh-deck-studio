@@ -42,8 +42,8 @@ bottom of the preview (paste / pick files work the same way).
 ### Way 2: drop files directly
 
 Put images under `designs/<ABBR>/` (canvas directory
-`.deck/projects/<canvasDeckId>/source/designs/<ABBR>/`, or `designs/<ABBR>/` inside any managed deck
-source). png / jpg / webp are supported; refresh the page afterwards.
+`<dataRoot>/projects/<canvasDeckId>/source/designs/<ABBR>/`). Existing `designs/<ABBR>/` directories in managed sources are also scanned read-only.
+Prefer uploading new samples through the canvas rather than modifying managed sources. png / jpg / webp are supported; refresh the page afterwards.
 
 Fields of `style.json` (the plugin also writes one automatically):
 
@@ -104,7 +104,7 @@ node scripts/f74-regenerate-presets.mjs --only=BIZ --limit=1
 ```
 
 What the script does: sync `styleBrief` from `seeds/styles/<ABBR>.json` into the online design's
-`style.json` → back up old samples to `.deck/tmp/f74-old-samples/<ABBR>/` → render one image per
+`style.json` → back up old samples to `<dataRoot>/tmp/f74-old-samples/<ABBR>/` → render one image per
 `baselineBriefs` entry (prompt recorded in `samples.jsonl`) → downscale and write back into `seeds/samples/`.
 Refresh the Designs page afterwards; no service restart needed.
 
