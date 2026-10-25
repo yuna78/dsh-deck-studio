@@ -1,7 +1,7 @@
 # DSH 兼容矩阵（定期回归记录）
 
 > 口径：DSH 处于 prerelease 阶段，没有 stable 线；本项目**定期批次**回归，不逐 rc 跟。
-> 每个批次记录：证实的版本、验证范围、断点、复现方式。已知限制与路线见 [productization.md](productization.md) 与 [install.md](install.md)。
+> 每个批次记录：证实的版本、验证范围、断点、复现方式。已知限制见 [install.md](install.md) 的故障排查部分。
 
 ## 当前支持声明
 
