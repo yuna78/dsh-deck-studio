@@ -11,7 +11,8 @@
 - 对话在 Chat 里继续，deck 的改动有 script / diff / revision / 治理文档撑底；
 - 出图**以页为单位**（工具一次一页），点名多页 / 整份时可连续出；每页保留 prompt、图片、版本、QA 和事件；
 - **修图（以图生图）**：`deck_image_edit` 拿已有图当底图只改点名部分（去水印 / 改标题 / 删元素），出新版本不覆盖旧图。
-- 风格（design）是独立实体：登记一次，之后换 deck 也能复用；
+- **直接播放**：工作台一键全屏演示，方向键翻页、Esc 退出，不必先导出 PPT；
+- **8 个内置风格模板 + 模板管理**：预览样张、创建自己的风格、补充参考图、在不同 deck 间复用；
 - **资料多也能读**：≥5 份参考资料时先规划调研批次、逐批读摘要，可引用事实随时落调研台账（不一次读完占满上下文）；
 - 源 deck 目录**只读**，所有编辑产物落在本地 `.deck/`（已 gitignore，不进仓库）。
 
@@ -31,7 +32,7 @@
 dsh --profile deckline --from-default-profile web
 
 # 2) 安装插件（直发 npm 包，无 scope）
-dsh plugin --profile deckline add dsh-plugin-deck-studio@0.2.4
+dsh plugin --profile deckline add dsh-plugin-deck-studio@0.2.5
 #   git 方式：dsh plugin --profile deckline add "github:yuna78/dsh-deck-studio#path:/plugin/deck-studio"
 #   本地开发：dsh plugin --profile deckline add "$PWD/plugin/deck-studio"
 
@@ -53,6 +54,36 @@ dsh --profile deckline --port 13090
 | 设计风格：关联 / 样张 / 换绑 | 设置：出图节点、模型、key 来源、尺寸 |
 |---|---|
 | ![Design](docs/assets/screenshots/04-design.png) | ![设置](docs/assets/screenshots/06-settings.png) |
+
+## 一键播放：写完就能讲
+
+在 deck 工作台点击 **「▶ 全屏演示」**，直接播放已有的整页图片幻灯片，无需先导出：
+
+- **← / ↑** 上一页，**→ / ↓** 下一页；笔记本没有 PageUp / PageDown 也能用。
+- **Esc** 退出，底部显示当前页码，支持点击上一页 / 下一页。
+- 播放不会调用生图、修改文案或覆盖图片；需要分享文件时再导出 PDF / PPTX。
+
+![Deckline 全屏演示：直接播放整页图片幻灯片](docs/assets/screenshots/08-presentation.png)
+
+## 内置模板与模板管理：Designs 风格库
+
+这里的**模板是可复用的视觉风格（Design）**，包含画面语言、风格提示词和样张，不是可编辑的 PPT 母版或固定布局。
+插件自带 **8 套模板、每套 3 张样张**：商务咨询、高端深色、日系极简、杂志编辑、科技蓝图、手绘白板、瑞士极简、渐变极光。
+首次启动自动导入；已有库也可点 **「＋ 导入预设风格」** 补齐，已存在的缩写会跳过。
+
+![Deckline 内置风格模板库：8 套预设、样张预览与添加入口](docs/assets/screenshots/09-style-library.png)
+
+**不只是选一个模板，还能长期维护自己的风格库：**
+
+- **预览和选择**：点卡片右上角眼睛查看样张；新建 deck 时选风格，已有 deck 可在 Design 页关联或更换。
+- **创建自己的模板**：在 Designs 点「＋ 添加风格」，填写名称、缩写和画面描述，粘贴 / 拖入 / 上传样张。
+- **管理定义与样张**：点卡片进入独立风格画布；查看、复制风格提示词，在 Chat 中修改风格定义；添加参考样张或让 Agent 生成新样张。
+- **跨 deck 复用**：查看使用该风格的 deck 和关联会话；误建的风格可从卡片删除。
+- 更换关联不会自动重绘旧页，旧图片仍保留；新出图使用当前关联的风格。
+
+![Deckline 模板管理：风格定义、提示词、关联会话与样张管理](docs/assets/screenshots/10-style-management.png)
+
+完整风格目录与自定义方式见 [风格指南](docs/styles.md)，逐步操作见 [使用手册](docs/manual.md)。
 
 ## 配置
 
@@ -167,7 +198,7 @@ deck 源（intent / script / 画面说明），随仓库分发，可直接拿来
 
 ## 状态
 
-- 当前版本：`v0.1.0`（可用，API 仍可能小改）
+- 当前版本：`v0.2.5`（可用，API 仍可能小改）
 - License：**MIT**（见 [LICENSE](LICENSE)）
 
 ## License

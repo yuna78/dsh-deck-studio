@@ -18,7 +18,8 @@ It turns "who is this for, what do we say, how do we draw it" into a traceable p
 
 - Conversation stays in chat; every deck change is backed by script / diff / revision / governance docs;
 - Images are rendered **one slide at a time**; each slide keeps its prompt, image, revisions, QA and events;
-- A design (style) is a first-class entity: register it once and reuse it across decks;
+- **Present immediately**: fullscreen playback, arrow-key navigation and Esc to exit — no export required;
+- **8 built-in style templates + template management**: preview samples, create your own designs and reuse them across decks;
 - The source deck directory is **read-only**; all edits land in the local `.deck/` workspace (gitignored, never committed).
 
 > A sample deck built with Deckline itself: [docs/sample-deck.md](docs/sample-deck.md) (Chinese).
@@ -49,6 +50,34 @@ Open the `http://127.0.0.1:13090/?token=…` URL printed in the terminal — tha
 DSH-native chat on the left, full-page image storyboard in the middle, document library on the right.
 
 Detailed steps, git subdirectory installs and troubleshooting: [docs/install.en.md](docs/install.en.md) (English; [Chinese](docs/install.md)).
+
+## Present directly from the workbench
+
+Click **▶ 全屏演示 (Fullscreen presentation)** in a deck to play its existing full-page slide images:
+
+- **← / ↑** goes back; **→ / ↓** goes forward — no PageUp / PageDown keys needed.
+- **Esc** exits; on-screen previous / next controls and a slide counter are available.
+- Playback does not generate images, edit content or overwrite revisions. Export PDF / PPTX when you need a file to share.
+
+![Deckline fullscreen presentation with slide navigation](docs/assets/screenshots/08-presentation.png)
+
+## Built-in templates and a reusable design library
+
+A **template here is a visual style (Design)**: visual language, a reusable style prompt and sample images — not an editable PowerPoint master or a fixed slide layout.
+Deckline ships **8 styles with 3 sample images each**: business consulting, premium dark, Japanese minimal, editorial, tech blueprint, whiteboard, Swiss minimal and aurora gradient.
+They are imported on first start. Use **＋ 导入预设风格 (Import presets)** to fill an existing library; existing abbreviations are skipped.
+
+![Eight built-in style templates with previews and management controls](docs/assets/screenshots/09-style-library.png)
+
+- **Preview and select:** use a card's eye button for samples; pick a style when creating a deck, or associate / switch it in an existing deck's Design tab.
+- **Create your own:** choose **＋ 添加风格 (Add style)**, enter a name, abbreviation and visual description, then paste, drag or upload sample images.
+- **Manage definitions and samples:** open a style's dedicated canvas to inspect / copy its prompt, ask the Agent to update its definition, upload references or generate new samples.
+- **Reuse across decks:** see linked decks and conversations; delete mistakenly created styles from their cards.
+- Switching styles does not redraw old slides. Existing images remain; future renders use the selected style.
+
+![Style management: definition, reusable prompt, conversations and sample controls](docs/assets/screenshots/10-style-management.png)
+
+See the [style guide](docs/styles.en.md) and [user manual](docs/manual.en.md) for detailed steps.
 
 ## Configuration
 
@@ -164,7 +193,7 @@ asked to invent them.
 
 ## Status
 
-- Current version: `v0.1.0` (usable; API may still change)
+- Current version: `v0.2.5` (usable; API may still change)
 - License: **MIT** (see [LICENSE](LICENSE))
 
 ## License
