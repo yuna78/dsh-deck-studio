@@ -9,6 +9,15 @@ Deckline（`dsh-plugin-deck-studio`）是 DeepSeek Harness（DSH）的 **image d
 > 目标用户：用 DSH 做内容/演示的人。装完后你可以：读 script 改 deck、按页出图（可点名批量连出）、管理治理文档、
 > 登记自己的设计风格（上传样张），并用 8 个预设风格直接开工。
 
+## 主助手基础能力（0.2.7起）
+
+Deckline制作模式显式提供联网搜索/抓取、文件/图片读取与检索、辅助草稿写编辑、只读研究子Agent、提问/待办/文件交付、时间与上下文压缩。不开放shell、任意preset委派或开发技能；内部听众审稿仍零工具。
+
+- `web_search`使用DSH宿主的搜索设置；默认DeepSeek后端需相应账户或`DEEPSEEK_API_KEY`。使用第三方LLM key不代表搜索已配置。`web_fetch`默认读取公开HTTP(S)网页。缺凭证/失败明确报错，不能靠加提示词修复。
+- 通用读只允许当前会话工作区与`deck-capabilities.config.readRoots`显式授权路径；秘密文件和symlink拒绝。读取其他资料请在profile精确授权，勿授权整个home；DSH图片附件使用`attachmentRoots`精确授权其objects子树下的图片文件/目录，仅`read_image`可用，不授权整个DSH目录。视觉读取还要求当前模型路由支持image输入。
+- 通用`write/edit`仅限工作区`.deck-assistant-scratch`辅助目录；脚本/意图/版本须用deck工具，不可绕过确认。宽泛目录搜索因秘密文件/链接被拒时缩小到干净资料目录。
+- 手写profile若覆盖`preset-deck-studio.config.plugins`，请合并新版`cordis.example.yml`的基础能力条目，重启后用新会话核对工具。不要把完整标准preset或Bash直接挂进来。
+
 ## 0. 前置条件
 
 插件0.2.6起需要 DSH 0.2.1-rc.2 或更新的0.2.x；升级后重启 DSH。若手写 profile 仍声明 `preset-deck-critic`，请移除；旧 `review.presetId` 已忽略，评审改由插件内部调度，不需选审稿模式。

@@ -194,7 +194,7 @@ asked to invent them.
 
 ## Status
 
-- Current version: `v0.2.6` (usable; API may still change)
+- Current version: `v0.2.7` (usable; API may still change)
 - License: **MIT** (see [LICENSE](LICENSE))
 
 ## License

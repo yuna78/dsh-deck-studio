@@ -32,7 +32,7 @@
 dsh --profile deckline --from-default-profile web
 
 # 2) 安装插件（直发 npm 包，无 scope）
-dsh plugin --profile deckline add dsh-plugin-deck-studio@0.2.6
+dsh plugin --profile deckline add dsh-plugin-deck-studio@0.2.7
 #   git 方式：dsh plugin --profile deckline add "github:yuna78/dsh-deck-studio#path:/plugin/deck-studio"
 #   本地开发：dsh plugin --profile deckline add "$PWD/plugin/deck-studio"
 
@@ -199,7 +199,7 @@ deck 源（intent / script / 画面说明），随仓库分发，可直接拿来
 
 ## 状态
 
-- 当前版本：`v0.2.6`（可用，API 仍可能小改）
+- 当前版本：`v0.2.7`（可用，API 仍可能小改）
 - License：**MIT**（见 [LICENSE](LICENSE)）
 
 ## License

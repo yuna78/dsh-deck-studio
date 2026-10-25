@@ -8,6 +8,16 @@ assets / conversations on the right. It is not a standalone app — it runs on a
 > from its script, render slide images on request (single page or a named batch), manage governance documents, register your own
 > design styles (with sample images) and start from 8 preset styles.
 
+## Assistant capabilities (0.2.7+)
+
+The Deckline preset explicitly mounts Web search/fetch, scoped file/image reading and search, scratch-file write/edit, a read-only research subagent, questions, todos, file delivery, time context and compaction. No shell, arbitrary-preset delegation or developer skills; internal audience reviewers remain tool-free.
+
+Search uses the host Web settings. The default DeepSeek backend requires its account/`DEEPSEEK_API_KEY`; a third-party chat key does not configure search. HTTP fetch reads public destinations. Missing credentials must produce an explicit error, not fabricated results.
+
+Generic reads are limited to the session workspace and explicit `deck-capabilities.config.readRoots`; secret paths and symlinks are denied. Authorize exact external material paths rather than an entire home directory. DSH image attachments use explicit `attachmentRoots` within its attachment objects subtree, for `read_image` only; this does not authorize the whole DSH directory. Image input also requires a vision-capable model route. Generic writes/edits are restricted to `.deck-assistant-scratch` under the workspace. Formal scripts, intent and revisions must use deck tools. Narrow directory searches to clean material directories if secret/symlink checks reject a broad scan.
+
+If a handwritten profile overrides `preset-deck-studio.config.plugins`, merge the capability entries from the updated `cordis.example.yml`, restart and check a new session. Do not mount the whole standard preset or shell as a workaround.
+
 ## 0. Prerequisites
 
 Plugin 0.2.6+ requires DSH 0.2.1-rc.2 or a newer 0.2.x release. Restart DSH after upgrading. Remove any manually declared `preset-deck-critic` entry from your profile; legacy `review.presetId` is ignored. Reviews now run internally without selecting another mode.

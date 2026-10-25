@@ -56,6 +56,48 @@
     description: '受控源 deck agent：读 script → 提 diff → 确认存 revision → 逐页出图 → 全链 trace；design 会话负责风格定义与样张。'
     order: 30
     plugins:
+      - id: deck-capabilities
+        name: 'dsh-plugin-deck-studio/capabilities'
+        config:
+          # 额外资料只读授权，使用绝对路径；不授权整个home或密钥目录。
+          readRoots: []
+          # 精确授权DSH附件objects下的图片路径/目录，仅read_image可用。
+          attachmentRoots: []
+      - id: tool-fs
+        name: '@deepseek-ai/dsh-tool-fs'
+      - id: tool-fs-search
+        name: '@deepseek-ai/dsh-tool-fs-search'
+        config:
+          sampleOverCapGlobResults: false
+      - id: tool-web
+        name: '@deepseek-ai/dsh-tool-web'
+        config:
+          fetch: true
+          search: true
+          searchTimeoutMs: 60000
+      - id: time-context
+        name: '@deepseek-ai/dsh-time-context'
+      - id: tool-ask-user
+        name: '@deepseek-ai/dsh-tool-ask-user'
+      - id: tool-todo
+        name: '@deepseek-ai/dsh-tool-todo'
+        config:
+          allowParallelInProgress: true
+      - id: present
+        name: '@deepseek-ai/dsh-tool-present'
+      - id: compaction
+        name: cordis:group
+        group: true
+        isolate:
+          compaction: true
+          toolResultPruner: true
+        config:
+          - id: compaction-basic
+            name: '@deepseek-ai/dsh-compaction-basic'
+          - id: command-compact
+            name: '@deepseek-ai/dsh-command-compact'
+          - id: tool-result-pruner
+            name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
       # persona 必须与插件 cordis.patch.yml 保持一致（smoke 会校验核心条款；改人设两处同步）
       - id: persona
         name: '@deepseek-ai/dsh-persona'
@@ -63,6 +105,13 @@
           prefix: |
             你是 dsh-deck-studio 的 Deck Agent（image deck 工作台的 agent 侧）。目标：最快把用户的想法变成能看的整页图片 deck；
             约束只用来保证结果稳定，不用来走流程。
+
+            ## 通用能力与边界
+            - 调研可用 web_search / web_fetch；有网址就读原文，引用保留URL。工具缺配置或失败须如实说，不宣称禁止联网，也不凭记忆造出处。搜索后端由宿主设置，LLM key不自动等于搜索key。
+            - read / read_image / glob / grep 仅限当前工作区或配置授权资料；宽泛检索被秘密文件保护拒绝时缩小到干净资料目录，不绕过。图片需实际调用read_image，不把文件路径当已看图。
+            - 通用write / edit仅用于工作区下 .deck-assistant-scratch 辅助草稿；正式script、intent、revision仍用deck工具与确认流程，不直接写源文件或密钥。
+            - 可用 deck_research_subagent 委派独立只读研究任务；明确材料、问题和输出，结果仍需核对。内部听众评审只走deck_script_review，不混作通用研究。
+            - 缺用户决定用ask_user_question；长任务用todo_write；交付文件用present。无shell、任意preset委派或开发技能，不要假装已执行。
 
             ## 闭环（工具形状已经决定了顺序，不用反复声明）
             1. 开工先调 deck_source_overview，看清受控源 / 本机新建 deck / 项目规则 / 内容密度；读 intent 的「听众 / 带走 / 成功标准」和 deck.rules.md，写作按受众来。
