@@ -11,11 +11,13 @@ Deckline（`dsh-plugin-deck-studio`）是 DeepSeek Harness（DSH）的 **image d
 
 ## 0. 前置条件
 
+插件0.2.6起需要 DSH 0.2.1-rc.2 或更新的0.2.x；升级后重启 DSH。若手写 profile 仍声明 `preset-deck-critic`，请移除；旧 `review.presetId` 已忽略，评审改由插件内部调度，不需选审稿模式。
+
 | 依赖 | 版本 | 说明 |
 |---|---|---|
 | Node.js | `^22.19` 或 `≥ 24` | 与 DSH 运行时一致；Node 23 不在支持范围 |
 | pnpm | 10+ | DSH 用 pnpm 管理 profile 依赖 |
-| DSH | `≥ 0.1.7 < 0.3`（0.1.5 不支持） | **用 npm 全局安装的发行版**：`npm i -g @deepseek-ai/dsh@0.2.1-rc.2`；已验证 0.2.1-rc.2，见 [compat.md](compat.md)。从源码自编译的 dsh 若缺内置包（如 `@deepseek-ai/dsh-agent-preset`）会启动失败，见 4.3 |
+| DSH | `≥ 0.2.1-rc.2 < 0.3`（插件0.2.6起） | **用 npm 全局安装的发行版**：`npm i -g @deepseek-ai/dsh@0.2.1-rc.2`；已验证 0.2.1-rc.2，见 [compat.md](compat.md)。从源码自编译的 dsh 若缺内置包（如 `@deepseek-ai/dsh-agent-preset`）会启动失败，见 4.3 |
 | 一个 LLM provider key | — | 例：`DEEPSEEK_API_KEY` / `OPENAI_API_KEY`（profile 里配置，见 DSH 文档） |
 | 一个 image 节点 key | — | 生成整页图用；可先用 fake 模式体验（见第 4 节） |
 

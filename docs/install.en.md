@@ -10,11 +10,13 @@ assets / conversations on the right. It is not a standalone app — it runs on a
 
 ## 0. Prerequisites
 
+Plugin 0.2.6+ requires DSH 0.2.1-rc.2 or a newer 0.2.x release. Restart DSH after upgrading. Remove any manually declared `preset-deck-critic` entry from your profile; legacy `review.presetId` is ignored. Reviews now run internally without selecting another mode.
+
 | Dependency | Version | Notes |
 |---|---|---|
 | Node.js | `^22.19` or `≥ 24` | Same as the DSH runtime; Node 23 is not supported |
 | pnpm | 10+ | DSH uses pnpm to manage profile dependencies |
-| DSH | `≥ 0.1.7 < 0.3` | `npm i -g @deepseek-ai/dsh`; verified on 0.1.7-rc.2 / 0.2.1-rc.2, see [compat.md](compat.md) |
+| DSH | `≥ 0.2.1-rc.2 < 0.3` (plugin 0.2.6+) | `npm i -g @deepseek-ai/dsh`; verified on 0.2.1-rc.2, see [compat.md](compat.md) |
 | An LLM provider key | — | e.g. `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` (configured in the profile, see DSH docs) |
 | An image node key | — | For real renders; the fake mode lets you try the flow first (section 4) |
 

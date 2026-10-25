@@ -19,6 +19,7 @@ import { readDeckRules, renderDeckRules } from "./deck-rules.js";
 import { readDeckBrief } from "./deck-brief.js";
 import { scriptStyleHints } from "./script-style.js";
 import { DEFAULT_MAX_REVIEWERS, HARD_MAX_REVIEWERS, deriveReviewers, mergeIssues, parseReviewerOutput, renderReviewMarkdown, reviewerPrompt } from "./review-personas.js";
+import { REVIEW_AGENT_PROVIDER } from "./review-agent.js";
 import { densityLine } from "./content-density.js";
 import { faqIndex, searchFaq } from "./faq.js";
 import { WATERMARK_POSITIONS, WATERMARK_POSITION_LABELS, findAsset, listAssets, positionLine, readPngFile, watermarkPng } from "./watermark.js";
@@ -138,7 +139,7 @@ const strEnum = (values) => ({ type: "string", enum: values });
  * @param {import('./config.js').mergeConfig} services.config
  * @param {NodeJS.ProcessEnv} [services.env]
  */
-export function defineDeckTools({ store, workspace, adapters, config, env = process.env, resolveRender = null, isLocalDeck = null, repoRoot = null, subagents = null, reviewPreset = null }) {
+export function defineDeckTools({ store, workspace, adapters, config, env = process.env, resolveRender = null, isLocalDeck = null, repoRoot = null, subagents = null }) {
   const resolveSubagents = () => (typeof subagents === "function" ? subagents() : subagents);
   const designs = createDesignRegistry({ dataRoot: config.dataRoot });
   const decksRegistryFile = join(config.dataRoot, "decks-registry.json");
@@ -2085,8 +2086,8 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
           reviewers: derived.reviewers,
           issues: [],
           text: textOnly(
-            "当前 profile 没有挂 subagent 服务（@deepseek-ai/dsh-subagent + dsh-subagent-spawn-in-process），无法起独立审稿人。\n" +
-              "在 profile 里挂上这三行后重试：dsh-subagent / dsh-subagent-spawn-in-process / dsh-tool-subagent。",
+            "当前 profile 没有挂 subagent 服务（@deepseek-ai/dsh-subagent），无法启动插件内置审稿人。\n" +
+              "请启用 DSH 子 Agent 服务后重试，不需要选择或安装审稿模式。",
           ),
         };
       }
@@ -2110,6 +2111,7 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
         else exec.signal?.addEventListener?.("abort", onAbort, { once: true });
         let timer;
         let activation;
+        const outcome = { reviewer, label: reviewer.label };
         const timeout = new Promise((_resolve, reject) => {
           timer = setTimeout(() => {
             controller.abort();
@@ -2118,7 +2120,7 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
         });
         try {
           activation = await runtime.startActivation({
-            provider: "spawn",
+            provider: REVIEW_AGENT_PROVIDER,
             label: `deck-review:${deck.id}:${reviewer.id}`,
             request: {
               prompt: [
@@ -2134,26 +2136,32 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
                 },
               ],
               parent: exec.agent,
-              ...(reviewPreset || config.review?.presetId ? { agentPreset: reviewPreset || config.review?.presetId } : {}),
             },
             signal: controller.signal,
             delivery: "caller",
           });
           const result = await Promise.race([activation.result, timeout]);
+          if (controller.signal.aborted) throw new Error("听众评审已取消或超时");
+          if (result?.stopReason !== "completed") throw new Error(`审稿人未正常完成（${result?.stopReason ?? "unknown"}）`);
           const text = activationResultText(result);
           const parsed = parseReviewerOutput(text);
-          return { reviewer, label: reviewer.label, parsed, text, stopReason: result?.stopReason ?? "" };
+          if (parsed.unparsed) throw new Error("审稿人未返回符合契约的 JSON 意见");
+          if (parsed.issues.some((issue) => !script.includes(issue.evidence))) {
+            throw new Error("审稿意见的证据不是稿件原文，已拒绝采纳");
+          }
+          Object.assign(outcome, { parsed, text, stopReason: result.stopReason });
         } catch (error) {
-          return { reviewer, label: reviewer.label, error: error instanceof Error ? error.message : String(error) };
+          outcome.error = error instanceof Error ? error.message : String(error);
         } finally {
           clearTimeout(timer);
           exec.signal?.removeEventListener?.("abort", onAbort);
           try {
             await activation?.dispose?.();
           } catch {
-            /* 清理失败不影响评审结果 */
+            outcome.error = "审稿执行清理失败，请检查 DSH 子任务状态";
           }
         }
+        return outcome;
       };
 
       // 审稿人并发跑：每个都是一次独立子 agent，互不影响；失败一个不拖垮整份评审。
@@ -2171,12 +2179,8 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
       const generatedAt = new Date().toISOString();
       const target = join(deckDir, "docs", "review.experts.md");
       let written = false;
-      if (args.write !== false) {
+      if (args.write !== false && !exec.signal?.aborted) {
         mkdirSync(dirname(target), { recursive: true });
-        const unparsed = ok
-          .filter((outcome) => outcome.parsed.unparsed)
-          .map((outcome) => `### ${outcome.label}\n\n${outcome.text.slice(0, 4000)}`)
-          .join("\n\n");
         const body = [
           renderReviewMarkdown({
             deckTitle: deck.title,
@@ -2186,7 +2190,6 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
             generatedAt,
             failed,
           }),
-          ...(unparsed ? ["", "## 未按 JSON 输出、原文保留", "", unparsed] : []),
         ].join("\n");
         writeFileSync(target, body.endsWith("\n") ? body : `${body}\n`, "utf8");
         written = true;
@@ -2213,7 +2216,7 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
       });
       const lines = issues.length
         ? issues.map((issue) => `${issue.severity} · ${issue.page || "—"} · ${issue.problem} → ${issue.suggestion}${issue.reviewer ? `（${issue.reviewer}）` : ""}`)
-        : ["没有可操作的问题（可能听众视角下确实没问题，也可能审稿人没读懂——先看 docs/review.experts.md 的原始评审）"];
+        : [ok.length ? "已完成评审，未发现有原文证据支持的可操作问题。" : "本次没有有效评审结果；不能据此判断稿件没有问题。"];
       const failureLine = failed.length
         ? `\n${failed.length} 位审稿人失败：${failed.map((item) => `${item.label}（${item.error}）`).join(" / ")}`
         : "";
@@ -2222,6 +2225,7 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
         reviewers: derived.reviewers.map((reviewer) => ({ id: reviewer.id, label: reviewer.label, audience: reviewer.audience })),
         issues,
         bySeverity,
+        failed,
         written,
         text: `听众评审（${derived.reviewers.map((reviewer) => reviewer.label).join(" / ")}）：P0 ${bySeverity.P0} / P1 ${bySeverity.P1} / P2 ${bySeverity.P2}${failureLine}\n${lines.join("\n")}${written ? `\n已写入：${target}` : "\n（dry run，未写文件）"}\n这些是评审意见，不是已改稿：按 P0/P1 用 deck_script_propose_edits 提案，等用户确认后再落版。`,
       };

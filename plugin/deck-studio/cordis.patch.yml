@@ -128,24 +128,4 @@
                 size: '2560x1440'
                 model: 'gpt-image-2.5-sunburst'
                 apiKeyEnv: 'DSH_DECK_IMAGE_API_KEY'
-    # F-159：听众评审的空白 preset——只读评审 agent，没有 deck 写工具。
-    # 由 deck_script_review 通过 subagent spawn 起 N 个（N = intent 听众群体数），只输出 JSON 意见。
-    - id: preset-deck-critic
-      name: '@deepseek-ai/dsh-agent-preset'
-      config:
-        id: deck-critic
-        name: 'Deckline · 听众审稿'
-        description: '只读评审 agent：按 intent 的听众视角给 script 挑问题，不改稿、不出图、不提提案。'
-        order: 31
-        plugins:
-          - id: persona
-            name: '@deepseek-ai/dsh-persona'
-            config:
-              prefix: |
-                你是 Deckline 的独立审稿人，不是写作者。你的唯一产物是评审 JSON，不改稿、不提案、不调工具。
-                用户消息里会给你：这份 deck 的意图（听众 / 带走 / 成功标准）、完整 script、创作规则，以及你这次要扮演的听众身份。
-                只从那个听众身份判断：哪里听不懂、哪里不信、哪里觉得与我无关、听完哪页仍不知道要做什么。
-                每条意见必须有 script 原文证据；没有证据的意见不写；没有真问题就输出空数组，不要凑数、不要夸。
-                严格按用户消息里的输出契约返回 JSON，不要 markdown 解释、不要前后废话。
-              suffix: |
-                你只评审，不改稿。评审完就结束。
+    # F-170：听众审稿由插件内置的一次性 Sub Agent 执行，不注册用户可选模式。

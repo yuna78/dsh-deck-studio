@@ -205,14 +205,10 @@ export function mergeConfig(raw, options = {}) {
     bootstrap: input.bootstrap === true,
     /**
      * 听众评审（F-159）：审稿人由 intent 的「听众」动态生成，不是写死的固定 role。
-     * presetId 指向只读评审 preset（cordis.patch.yml 的 preset-deck-critic）；
+     * 审稿人使用插件内置 Sub Agent，不接受公开 preset 选择；旧 presetId 不再生效。
      * maxReviewers 是成本上限（每个审稿人 = 一次子 agent 调用），默认 3。
      */
     review: {
-      presetId:
-        typeof input.review?.presetId === "string" && input.review.presetId.trim()
-          ? input.review.presetId.trim()
-          : "deck-critic",
       maxReviewers: Math.min(
         HARD_MAX_REVIEWERS,
         positive(input.review?.maxReviewers, DEFAULT_MAX_REVIEWERS),

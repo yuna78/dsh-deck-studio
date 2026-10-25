@@ -154,7 +154,7 @@ export function reviewerPrompt({ reviewer, brief, deckTitle, script, rulesText =
 /** 从子 agent 的最终文本里取 JSON（容忍 ```json 围栏 / 前后废话）。 */
 export function parseReviewerOutput(text) {
   const raw = String(text ?? "").trim();
-  if (!raw) return { reviewer: "", verdict: "", issues: [], raw: "" };
+  if (!raw) return { reviewer: "", verdict: "", issues: [], raw: "", unparsed: true };
   const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
   const candidates = [fenced?.[1], raw].filter(Boolean);
   for (const candidate of candidates) {
@@ -163,6 +163,15 @@ export function parseReviewerOutput(text) {
     if (start < 0 || end <= start) continue;
     try {
       const parsed = JSON.parse(candidate.slice(start, end + 1));
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
+          || typeof parsed.reviewer !== "string" || !parsed.reviewer.trim()
+          || typeof parsed.verdict !== "string" || !parsed.verdict.trim()
+          || !Array.isArray(parsed.issues) || parsed.issues.length > 8
+          || parsed.issues.some((issue) => !issue || typeof issue !== "object"
+            || !["P0", "P1", "P2"].includes(String(issue.severity).toUpperCase())
+            || ["page", "problem", "evidence", "suggestion"].some((key) => typeof issue[key] !== "string" || !issue[key].trim()))) {
+        continue;
+      }
       const issues = Array.isArray(parsed.issues)
         ? parsed.issues
             .map((issue) => ({

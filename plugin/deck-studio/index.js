@@ -24,6 +24,7 @@ import { pageEditView, savePageEdit } from "./lib/script-writer.js";
 import { buildDeckRules, readDeckRules } from "./lib/deck-rules.js";
 import { contentDensityOptions, densitySpec, normalizeContentDensity } from "./lib/content-density.js";
 import { defineDeckTools } from "./lib/tools.js";
+import { registerReviewAgentProvider } from "./lib/review-agent.js";
 import { faqIndex, searchFaq } from "./lib/faq.js";
 import { createScriptToSourceSync, decideProposal } from "./lib/proposal-decision.js";
 import { createDesignRegistry, normalizeAbbr } from "./lib/designs.js";
@@ -2022,6 +2023,13 @@ export function apply(ctx, rawConfig) {
 
   /** @type {Array<() => unknown>} */
   const disposers = [];
+  // F-170：审稿是插件内部一次性 Sub Agent，不注册第二个用户 Mode。
+  // 仅根挂载拥有 provider；等待运行时服务就绪，避免 preset 子树重复注册。
+  if (config.routes) {
+    ctx.inject(["agents", "subagents"], (runtimeCtx) => {
+      registerReviewAgentProvider(runtimeCtx);
+    });
+  }
   const registerRoute = (path, respond, methods = ["GET"]) => {
     if (!config.routes) return;
     disposers.push(
@@ -2326,7 +2334,7 @@ export function apply(ctx, rawConfig) {
     if (!toolRuntime?.register) {
       ctx.logger?.warn?.(`${name}: config.tools=true 但 tools 服务不可用——deck 工具未注册`);
     } else {
-      const tools = defineDeckTools({ store: service.store, workspace: service.workspace, adapters: service.adapters, config, env: process.env, repoRoot: repoRootFrom(PLUGIN_DIR), isLocalDeck: (deckId) => service.isLocalDeck(deckId), resolveRender: (deckId) => service.renderRuntime(deckId), subagents: () => ctx.get("subagents") ?? null, reviewPreset: config.review?.presetId });
+      const tools = defineDeckTools({ store: service.store, workspace: service.workspace, adapters: service.adapters, config, env: process.env, repoRoot: repoRootFrom(PLUGIN_DIR), isLocalDeck: (deckId) => service.isLocalDeck(deckId), resolveRender: (deckId) => service.renderRuntime(deckId), subagents: () => ctx.get("subagents") ?? null });
       for (const tool of tools) {
         disposers.push(toolRuntime.register(tool));
       }

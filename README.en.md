@@ -29,8 +29,8 @@ It turns "who is this for, what do we say, how do we draw it" into a traceable p
 
 ## Install in 5 minutes
 
-Prerequisites: Node.js `^22.19 or ≥24`, pnpm 10+, DSH `≥ 0.1.7 < 0.3`
-(`npm i -g @deepseek-ai/dsh`; verified on 0.1.7-rc.2 and 0.2.1-rc.2, see [docs/compat.md](docs/compat.md)).
+Prerequisites: Node.js `^22.19 or ≥24`, pnpm 10+, DSH `≥ 0.2.1-rc.2 < 0.3`
+(`npm i -g @deepseek-ai/dsh`; this version is verified on 0.2.1-rc.2, see [docs/compat.md](docs/compat.md)).
 
 ```sh
 # 1) create a deckline profile
@@ -194,7 +194,7 @@ asked to invent them.
 
 ## Status
 
-- Current version: `v0.2.5` (usable; API may still change)
+- Current version: `v0.2.6` (usable; API may still change)
 - License: **MIT** (see [LICENSE](LICENSE))
 
 ## License
