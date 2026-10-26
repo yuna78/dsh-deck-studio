@@ -19,7 +19,7 @@ It turns "who is this for, what do we say, how do we draw it" into a traceable p
 - Conversation stays in chat; every deck change is backed by script / diff / revision / governance docs;
 - Images are rendered **one slide at a time**; each slide keeps its prompt, image, revisions, QA and events;
 - **Present immediately**: fullscreen playback, arrow-key navigation and Esc to exit — no export required;
-- **8 built-in style templates + template management**: preview samples, create your own designs and reuse them across decks;
+- **9 built-in style templates + template management**: preview samples, create your own designs and reuse them across decks;
 - **Configurable storage**: runtime data defaults to `$DSH_HOME/deckline` (usually `~/.dsh/deckline`); managed source decks are read-only, while a confirmed local deck may write back to its source files.
 
 > A sample deck built with Deckline itself: [docs/sample-deck.md](docs/sample-deck.md) (Chinese).
@@ -48,6 +48,16 @@ dsh --profile deckline --port 13090
 Open the `http://127.0.0.1:13090/?token=…` URL printed in the terminal — that is the **workbench home**
 (Decks / Designs / Assets / Conversations). Open a deck to get the **three-column workspace**:
 DSH-native chat on the left, full-page image storyboard in the middle, document library on the right.
+
+Once installed you don't need to remember commands: the header keeps three buttons on the right —
+**⚙** jumps to the settings panel (render node / model / size), **↻ v0.2.10** checks npm for a newer release
+(one click runs `dsh plugin add`; restart DSH to apply), and **GitHub** opens the repo's new-issue page. A `link:` / `file:` development install is recognised and never
+auto-updated (it would replace your local link), it just explains to pull the repo instead.
+
+```sh
+# command-line equivalent
+dsh plugin --profile deckline add dsh-plugin-deck-studio@latest
+```
 
 Detailed steps, git subdirectory installs and troubleshooting: [docs/install.en.md](docs/install.en.md) (English; [Chinese](docs/install.md)).
 
@@ -195,7 +205,7 @@ asked to invent them.
 
 ## Status
 
-- Current version: `v0.2.7` (usable; API may still change)
+- Current version: `v0.2.10` (usable; API may still change)
 - License: **MIT** (see [LICENSE](LICENSE))
 
 ## License

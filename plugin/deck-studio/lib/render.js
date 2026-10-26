@@ -20,36 +20,124 @@ const SECRET_PATTERNS = [
 ];
 
 /**
+ * 从正文里抽「要点」短句（F-189）：图上只放短句，不排长段。
+ * 切块优先级：空行分段 → ①②③ 编号 → 句号；每块取冒号前的标签 + 后半句短描述，压到 ~28 字。
+ * @param {string} body
+ * @param {number} [limit]
+ * @returns {string[]}
+ */
+/** 把一句压到 limit 字内：优先在标点处断（不出现省略号——画面上的省略号会被当成内容印出来）。 */
+function shortenClause(text, limit = 28) {
+  const value = String(text ?? "").trim();
+  if (value.length <= limit) return value;
+  const cut = value.slice(0, limit);
+  let best = -1;
+  for (const punct of ["，", "、", "；", "：", "。"]) {
+    best = Math.max(best, cut.lastIndexOf(punct));
+  }
+  const base = best >= 10 ? cut.slice(0, best) : cut;
+  return base.replace(/[，、；：。]$/u, "").trim();
+}
+
+export function bodyKeyPoints(body, limit = 4) {
+  const text = String(body ?? "").trim();
+  if (!text) return [];
+  const blocks = text
+    .split(/\n{2,}|[①②③④⑤⑥⑦⑧⑨⑩]/u)
+    .map((block) => block.trim())
+    .filter(Boolean);
+  const points = [];
+  for (const block of blocks) {
+    const first = block.split(/(?<=[。！？])/u)[0].trim().replace(/[。！？]$/u, "");
+    if (!first) continue;
+    // 「标签（补充）：说明」→ 保留标签 + 说明的首个短句，图上才读得完
+    const match = first.match(/^([^：]{1,14}：)\s*(.+)$/u);
+    const point = match ? `${match[1]}${shortenClause(match[2], 20)}` : shortenClause(first);
+    if (point) points.push(point);
+    if (points.length >= limit) break;
+  }
+  return points;
+}
+
+/**
+ * 「这一页必须在画面上印出的文字」清单（F-189）。
+ * 出图模型只认「要印什么」，把字段名换成口语会漏印——所以这里给出逐字清单，供 prompt 与 QA 共用。
+ * @param {object} slide
+ * @returns {{title:string, subtitle:string, claim:string, bullets:string[]}}
+ */
+export function onImageText(slide) {
+  const text = (value) => String(value ?? "").trim();
+  const title = text(slide?.title);
+  const subtitle = text(slide?.question);
+  const claim = text(slide?.claim);
+  return {
+    title,
+    subtitle,
+    // 主张超过 40 字就别整句塞画面（读不完），让副标题 + 要点承担信息。
+    claim: claim.length > 40 ? `${claim.slice(0, 39)}…` : claim,
+    bullets: bodyKeyPoints(slide?.body),
+  };
+}
+
+const ON_IMAGE_HEAD = "【这一页必须在画面上印出的文字：逐字照排，不要改写、翻译、缩写或省略】";
+/** 反装饰：图例 / 清单面板 / 英文角标这类「看起来专业但跟本页无关」的元素，模型最容易凭空造。 */
+const CANVAS_DISCIPLINE =
+  "画面纪律：只画上面【图上文字】与「画面要求」点名的元素；不要新增图例 / 清单面板 / 装饰性英文标签 / 示意数据 / 与内容无关的图标；同一元素不要既画出来又列进清单（重复两遍）；同一信息只写一次，不要用双层括号，也不要既加括注又写注释行。";
+
+/** 把清单渲染成 prompt 行（QA 只检查 head 存在与关键行逐字命中）。 */
+function onImageLines(list) {
+  const lines = [ON_IMAGE_HEAD];
+  if (list.title) lines.push(`主标题：${list.title}`);
+  if (list.subtitle) lines.push(`副标题（标题下方一行，字号小于主标题）：${list.subtitle}`);
+  if (list.claim) lines.push(`一句话主张：${list.claim}`);
+  if (list.bullets.length) {
+    lines.push("要点（原句只作理解；画面上每条压成 ≤12 字短语贴到对应模块）：");
+    list.bullets.forEach((point, index) => lines.push(`${index + 1}. ${point}`));
+  }
+  lines.push("版式与字号预算：主标题最大；副标题紧接其下、约标题的 45% 字号；一句话主张做成通栏一行（字号小于副标题、大于要点）——这三项都必须完整印出，不得省略或用别的话替代。");
+  return lines;
+}
+
+/**
  * 由 slide 字段 + 全局风格 preset 组 prompt。
  * F-158：封面页单列一套版式纪律（只放标题/副标题/作者/日期，不堆正文）；
  * 普通页带上 intent 的受众 / 目的，避免「图很漂亮但讲错人」。
+ * F-189：文字不再是「语境」，而是显式「图上文字清单」——副标题 / 主张 / 要点逐字列出，
+ * 并声明与 visualBrief 的排他指令冲突时文字优先（否则「画面上只出现 XX 标签」会把副标题吞掉）。
  * @param {object} slide manifest slide
  * @param {string} styleBrief
  * @param {{brief?: object}} [context] readDeckBrief() 的结果
  */
 export function buildPrompt(slide, styleBrief, context = {}) {
   const brief = context.brief ?? {};
+  const list = onImageText(slide);
   const isCover = slide?.type === "cover" || Number(slide?.order) === 1;
   if (isCover) {
-    const parts = [styleBrief, "封面页（16:9）：只放标题信息", `主标题：${slide?.title ?? ""}`];
-    if (slide?.question) parts.push(`副标题：${slide.question}`);
+    const parts = [styleBrief, "封面页（16:9）：只放标题信息", ...onImageLines({ ...list, bullets: [] })];
     parts.push(...coverPromptLines(brief));
     parts.push("版式纪律：只放主标题 / 副标题 / 作者 / 日期；正文不超过一行；不要目录、要点清单、数据图表、大段文字；留白为主。");
     if (slide?.visualBrief) parts.push(`画面要求：${slide.visualBrief}`);
+    parts.push(CANVAS_DISCIPLINE);
+    parts.push("文字优先：上面【图上文字】的每一行都必须出现在画面里；画面要求与它冲突时，以上面为准。");
     return parts.filter(Boolean).join("\n");
   }
-  const parts = [styleBrief, `页面标题：${slide.title ?? ""}`];
-  if (slide.question) parts.push(`这页回答：${slide.question}`);
-  if (slide.claim) parts.push(`主张：${slide.claim}`);
-  const body = String(slide.body ?? "").trim();
-  if (body) parts.push(`正文要点：${body.slice(0, 300)}`);
-  if (slide.visualBrief) parts.push(`画面要求：${slide.visualBrief}`);
+  const parts = [styleBrief, ...onImageLines(list)];
+  const body = String(slide?.body ?? "").trim();
+  if (body) parts.push(`讲述用正文（不要整段排进画面，只提炼成上面的要点；用来把握语气与例子）：${body.slice(0, 300)}`);
+  if (slide?.visualBrief) parts.push(`画面要求：${slide.visualBrief}`);
+  parts.push(CANVAS_DISCIPLINE);
+  parts.push("文字优先：上面【图上文字】的主标题 / 副标题 / 主张必须完整印出（可换行、可分层，但不得省略、不得改写成别的说法）；画面要求若写「只出现 XX」，XX 之外仍要保留这三项与要点短语。");
   parts.push(...briefPromptLines(brief));
   return parts.filter(Boolean).join("\n");
 }
 
-/** QA 门禁。返回 {ok, checks:[{name, ok, detail}]}。 */
-export function qaCheck(prompt, size) {
+/**
+ * QA 门禁。返回 {ok, checks:[{name, ok, detail}]}。
+ * @param {string} prompt 最终 prompt
+ * @param {string} size 尺寸
+ * @param {object} [slide] 传了就额外检查「图上文字」是否都在 prompt 里（F-189）
+ */
+export function qaCheck(prompt, size, slide) {
   const checks = [];
   const promptOk = typeof prompt === "string" && prompt.trim().length >= 8;
   checks.push({ name: "prompt-exists", ok: promptOk, detail: promptOk ? `${prompt.trim().length} chars` : "prompt 为空或过短" });
@@ -57,6 +145,15 @@ export function qaCheck(prompt, size) {
   checks.push({ name: "size-valid", ok: sizeOk, detail: String(size ?? "") });
   const secretHit = SECRET_PATTERNS.find(([pattern]) => pattern.test(prompt ?? ""));
   checks.push({ name: "no-secrets", ok: !secretHit, detail: secretHit ? `疑似敏感串：${secretHit[1]}` : "clean" });
+  if (slide) {
+    const list = onImageText(slide);
+    const missing = [];
+    if (!String(prompt ?? "").includes(ON_IMAGE_HEAD)) missing.push("图上文字清单");
+    if (list.title && !String(prompt ?? "").includes(list.title)) missing.push("主标题");
+    if (list.subtitle && !String(prompt ?? "").includes(list.subtitle)) missing.push("副标题");
+    if (list.claim && !String(prompt ?? "").includes(list.claim)) missing.push("主张");
+    checks.push({ name: "on-image-text", ok: missing.length === 0, detail: missing.length ? `prompt 缺：${missing.join(" / ")}` : `${list.title ? "标题" : ""}${list.subtitle ? "+副标题" : ""}${list.claim ? "+主张" : ""}${list.bullets.length ? `+${list.bullets.length} 要点` : ""}` || "clean" });
+  }
   return { ok: checks.every((check) => check.ok), checks };
 }
 

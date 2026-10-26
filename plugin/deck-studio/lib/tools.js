@@ -1214,7 +1214,7 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
           ? [linked.brief, linked.constraints ? `不要什么：${linked.constraints}` : ""].filter(Boolean).join("\n")
           : config.styleBrief;
         const prompt = buildPrompt(slide, styleBrief, { brief: readDeckBrief(renderAdapter.sourceRoot) });
-        const qa = qaCheck(prompt, size);
+        const qa = qaCheck(prompt, size, slide);
         if (!qa.ok) {
           store.recordEvent({ type: "deck.qa", sessionId, taskId: task.taskId, deckId: deck.id, slideIds: [pageId], actor: "system", status: "failed", payload: { gate: "qa", qa } });
           return tryFinish({ status: "failed", error: "qa-gate", value: { taskId: task.taskId, deckId: deck.id, slideIds: [pageId], qa, text: `QA 门禁未通过：${qa.checks.filter((check) => !check.ok).map((check) => `${check.name}(${check.detail})`).join("；")}` } });
@@ -1380,6 +1380,7 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
       };
       try {
         const prompt = `# 修图（局部修改，其余保持不变）\n${instruction}\n\n要求：只改点名的地方；不换整页构图；图里的文字保持可读，不要新增没提到的文字或 logo。`;
+        // 修图是「以现有图为底图」的局部指令，不走「图上文字清单」检查（那是整页出图的门禁）。
         const qa = qaCheck(prompt, size);
         if (!qa.ok) {
           store.recordEvent({ type: "deck.qa", sessionId, taskId: task.taskId, deckId: deck.id, slideIds: pageId ? [pageId] : [], actor: "system", status: "failed", payload: { gate: "qa", qa } });

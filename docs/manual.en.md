@@ -292,3 +292,20 @@ fabrication, explicit confirmation); suspicious instructions are flagged, never 
 | `exports/` | exported PDF / PPTX / handoff bundles. |
 
 `.deck/` and `exports/` are gitignored; the repository only ships code, docs, samples and preset styles.
+## 13. Updating the plugin & giving feedback
+
+Three always-on buttons live in the top-right of the workbench header:
+
+| Button | What it does |
+|---|---|
+| **⚙** | Jumps to the settings panel (render node / model / API key source / size); from the home page it returns to the current deck first |
+| **↻ vX.Y.Z** | Checks npm for the latest release: up to date → tells you the version; newer → asks "current vX → vY", then runs `dsh plugin add` for you (restart DSH to apply). A `link:` / `file:` dev install is never auto-updated — it explains to pull the repo instead, so your local link is not replaced by a registry copy |
+| **GitHub** | Opens the repo's new-issue page (feature requests / bug reports) |
+
+Command-line equivalent:
+
+```sh
+dsh plugin --profile deckline add dsh-plugin-deck-studio@latest
+```
+
+If npm is unreachable the button says so ("check timed out") instead of hanging.

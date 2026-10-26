@@ -83,11 +83,16 @@
 .tool-line.err{border-left-color:#c0533f;background:#faf0ed;color:#8c3a2c;white-space:normal}
 
 /* 8 份必备文档（中间区标签） */
-.doc-head{display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:10px}
-.doc-head h2{margin:6px 0 0;font-family:"Noto Serif SC",Georgia,serif;font-size:22px;color:var(--ink)}
-.doc-head .doc-file{margin-left:auto;color:#8a9599;font-size:10.5px;align-self:center}
-/* F-187：审稿页的相关文件切换（听众读后感 / 意图差距 / 工程口径 …） */
-.doc-head .doc-files{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;max-width:70%}
+.doc-head{display:flex;flex-direction:column;gap:6px;margin-bottom:10px}
+.doc-head-top{display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap}
+.doc-head-top h2{margin:6px 0 0;font-family:"Noto Serif SC",Georgia,serif;font-size:22px;color:var(--ink)}
+.doc-head-side{margin-left:auto;display:flex;flex-direction:column;align-items:flex-end;gap:5px;text-align:right}
+.doc-head .doc-file{color:#8a9599;font-size:10.5px}
+/* F-187：审稿页的相关文件切换（听众读后感 / 意图差距 / 工程口径 …）
+   F-188 后续：一轮评审有 5 个 chip，跟标题挤一行会右对齐折成两截，改成独立一行、左对齐。 */
+.doc-head-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:2px}
+.doc-head .doc-files{margin:0;display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-start;max-width:100%}
+.doc-head-extra{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
 .doc-file-chip{border:1px solid #d7dee0;background:#fff;color:#5a6a70;border-radius:999px;padding:3px 10px;font-size:10.5px;cursor:pointer}
 .doc-file-chip:hover{border-color:#0f6f7a;color:#0f6f7a}
 .doc-file-chip.active{background:#0f6f7a;border-color:#0f6f7a;color:#fff}
@@ -690,3 +695,15 @@ body.presenting{overflow:hidden}
 .source-title .doc-status{margin-left:8px;font-size:9px;font-weight:400;vertical-align:2px}
 .doc-status.optional{color:#7a7f7c;background:#efece3;border:1px solid #e0dbcd;border-radius:8px;padding:0 6px;line-height:16px}
 .source-hint{font-size:10px;color:#8b8f8b;margin-top:3px;line-height:1.5}
+
+/* F-188：顶栏「更新 / GitHub」小按钮 + 临时提示（顶栏是深色，沿用 .top button 的浅色底） */
+.top .dl-icon-btn{position:relative;display:inline-flex;align-items:center;gap:5px;padding:6px 9px;cursor:pointer;font:inherit;font-size:12px;line-height:1}
+.top .dl-icon-btn:hover{background:#ffffff2e}
+.top .dl-icon-btn:active{transform:translateY(1px)}
+.top .dl-icon-btn.busy svg{animation:dl-spin 1s linear infinite}
+.top .dl-icon-btn svg{flex:0 0 auto;opacity:.85}
+.top .dl-icon-ver{opacity:.72;font-size:11px;font-variant-numeric:tabular-nums}
+.top .dl-icon-dot{position:absolute;top:3px;right:4px;width:7px;height:7px;border-radius:50%;background:#e8b45c;box-shadow:0 0 0 2px var(--ink)}
+.dl-toast{position:fixed;left:50%;top:66px;transform:translateX(-50%) translateY(-6px);z-index:80;max-width:min(560px,90vw);padding:9px 14px;border:1px solid var(--line);border-radius:10px;background:#fffdf7;color:#2c2a26;font-size:13px;line-height:1.5;box-shadow:0 10px 28px rgba(0,0,0,.18);opacity:0;pointer-events:none;transition:opacity .16s ease,transform .16s ease;white-space:pre-wrap}
+.dl-toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+@keyframes dl-spin{to{transform:rotate(360deg)}}

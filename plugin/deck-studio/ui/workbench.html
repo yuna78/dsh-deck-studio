@@ -92,6 +92,19 @@
   <span class="project">AI Image Deck Studio</span>
   <span class="spacer"></span>
   <span id="save">DSH 会话 · 连接中…</span>
+  <!-- F-188：更新 / 仓库 / 设置入口（点刷新查 npm 最新版，有新版带小圆点） -->
+  <button id="settingsBtn" class="dl-icon-btn" title="设置（出图节点 / 模型 / 尺寸）" aria-label="设置">
+    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M19.4 13a7.7 7.7 0 0 0 0-2l2-1.6-2-3.4-2.4 1a7.7 7.7 0 0 0-1.7-1L15 3.5h-4l-.3 2.5a7.7 7.7 0 0 0-1.7 1l-2.4-1-2 3.4 2 1.6a7.7 7.7 0 0 0 0 2l-2 1.6 2 3.4 2.4-1a7.7 7.7 0 0 0 1.7 1l.3 2.5h4l.3-2.5a7.7 7.7 0 0 0 1.7-1l2.4 1 2-3.4-2-1.6zM12 15.2A3.2 3.2 0 1 1 12 8.8a3.2 3.2 0 0 1 0 6.4z"/></svg>
+  </button>
+  <button id="updateBtn" class="dl-icon-btn" title="检查更新" aria-label="检查更新">
+    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M12 4V1.5L7.5 6l4.5 4.5V8a5 5 0 1 1-5 5H5a7 7 0 1 0 7-9z"/></svg>
+    <span class="dl-icon-ver" id="updateVer">—</span>
+    <i class="dl-icon-dot" id="updateDot" hidden></i>
+  </button>
+  <button id="repoBtn" class="dl-icon-btn" title="GitHub 仓库 / 提建议" aria-label="GitHub 仓库">
+    <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+  </button>
+  <div id="dlToast" class="dl-toast" hidden></div>
   <button id="shellSidebarBtn" title="显示 / 收起 DSH 侧栏（会话 · 插件 · 设置）" hidden>☰ DSH</button>
 </header>
 
@@ -1044,6 +1057,137 @@ async function postJson(routeName, body) {
   return data;
 }
 
+/** GET 一个插件路由（失败抛后端 message）。 */
+async function getJson(routeName) {
+  const res = await fetch("/api/deck-studio." + routeName, { headers: { accept: "application/json" } });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data?.ok === false) throw new Error(data?.error?.message || "HTTP " + res.status);
+  return data;
+}
+
+/** 顶栏临时提示（不打断操作）。 */
+let DL_TOAST_TIMER = null;
+function dlToast(text, ms = 4200) {
+  const box = getEl("dlToast");
+  if (!box) return;
+  box.textContent = text;
+  box.hidden = false;
+  box.classList.add("show");
+  clearTimeout(DL_TOAST_TIMER);
+  DL_TOAST_TIMER = setTimeout(() => {
+    box.classList.remove("show");
+    box.hidden = true;
+  }, ms);
+}
+
+/** F-188：更新状态（版本 / 安装方式 / 仓库链接）由 workbench payload 带下来。 */
+const UPDATE = { current: "", latest: "", hasUpdate: false, installMode: "", repo: "", suggest: "", note: "" };
+
+function paintUpdate() {
+  const ver = getEl("updateVer");
+  if (ver) ver.textContent = UPDATE.current ? `v${UPDATE.current}` : "—";
+  const dot = getEl("updateDot");
+  if (dot) dot.hidden = !UPDATE.hasUpdate;
+  const btn = getEl("updateBtn");
+  if (btn) {
+    btn.title = UPDATE.hasUpdate
+      ? `有新版 v${UPDATE.latest}（当前 v${UPDATE.current}）`
+      : UPDATE.installMode === "linked"
+        ? "本机是开发链接安装：更新走 git pull"
+        : "检查更新";
+  }
+}
+
+function absorbUpdate(payload) {
+  const brief = payload?.update ?? {};
+  if (brief.currentVersion) UPDATE.current = brief.currentVersion;
+  if (brief.installMode) UPDATE.installMode = brief.installMode;
+  if (brief.repo) UPDATE.repo = brief.repo;
+  if (brief.suggest) UPDATE.suggest = brief.suggest;
+  if (brief.issues) UPDATE.issues = brief.issues;
+  paintUpdate();
+}
+
+async function runPluginUpdate() {
+  try {
+    const data = await postJson("update", {});
+    UPDATE.current = data.to || UPDATE.current;
+    UPDATE.hasUpdate = false;
+    paintUpdate();
+    openConfirm({
+      title: `已更新到 v${data.to}`,
+      desc: `${data.restartHint || "重启 DSH 后生效。"}\n\n${data.output ? String(data.output).slice(-600) : ""}`,
+      okLabel: "知道了",
+      onOk: null,
+    });
+  } catch (error) {
+    dlToast(String(error?.message || error), 8000);
+  }
+}
+
+/** 点刷新：先查 npm 最新版，再决定是提示「已是最新」、解释开发链接、还是弹更新确认。 */
+async function checkPluginUpdate() {
+  const btn = getEl("updateBtn");
+  if (btn) btn.classList.add("busy");
+  try {
+    const data = await getJson("update-check");
+    UPDATE.latest = data.latestVersion || "";
+    UPDATE.hasUpdate = Boolean(data.hasUpdate);
+    UPDATE.installMode = data.installMode || UPDATE.installMode;
+    if (data.note) UPDATE.note = data.note;
+    paintUpdate();
+    if (data.error) {
+      dlToast(data.error, 6000);
+      return;
+    }
+    if (!UPDATE.hasUpdate) {
+      dlToast(`已是最新版本 v${data.currentVersion}`);
+      return;
+    }
+    if (data.installMode === "linked") {
+      dlToast(data.note || "本机是开发链接安装，更新走仓库（git pull）。", 7000);
+      return;
+    }
+    if (data.installMode !== "npm") {
+      dlToast("没识别出 profile 的安装方式，无法一键更新；请手动 dsh plugin add。", 7000);
+      return;
+    }
+    openConfirm({
+      title: `更新到 v${data.latestVersion}`,
+      desc: `当前 v${data.currentVersion} → v${data.latestVersion}。会在 profile 里执行 pnpm add，下载完成后重启 DSH 生效。`,
+      okLabel: "更新",
+      onOk: runPluginUpdate,
+    });
+  } catch (error) {
+    dlToast(`检查更新失败：${String(error?.message || error)}`, 6000);
+  } finally {
+    if (btn) btn.classList.remove("busy");
+  }
+}
+
+/** 顶栏齿轮：直接切到右栏「设置」（首页时先回到当前 deck 的工作台）。 */
+async function openSettingsPanel() {
+  const deckId = STATE.data?.active?.deckId;
+  if (!deckId) {
+    dlToast("先在 Decks 里打开一本 deck，右栏就有设置（出图节点 / 模型 / 尺寸）", 6000);
+    return;
+  }
+  if (STATE.view === "home") await showDeck(deckId);
+  activateRightTab("settings");
+  const panel = getEl("settings");
+  if (panel) panel.scrollIntoView({ block: "start" });
+}
+
+/** 打开仓库 / 提建议页（新标签）。 */
+function openRepo() {
+  const url = UPDATE.suggest || UPDATE.issues || UPDATE.repo;
+  if (!url) {
+    dlToast("插件包里没配 repository 链接", 5000);
+    return;
+  }
+  window.open(url, "_blank", "noopener");
+}
+
 let CONFIRM_OK = null;
 
 /** 通用确认弹层（删除等破坏性操作用）。 */
@@ -1407,12 +1551,24 @@ function emptyDoc(doc) {
 }
 
 function docHeader(doc, extra = "") {
+  // 只有「多个可切换的文档」才出 chip：目录（prompts/ 之类）、不存在的相关文件都不算。
+  // 以前脚本页右侧也挂着 script.md / prompts/ 两个 chip，看着像能切，其实没内容可切。
+  const switchable = (doc.files || []).filter((file) => !String(file.name || "").endsWith("/") && file.exists !== false);
+  const chips = switchable.length > 1
+    ? `<div class="doc-files">${switchable.map((file) => `<button type="button" class="doc-file-chip${file.name === doc.primary ? " active" : ""}" data-doc-file="${esc(file.name)}" title="${esc(file.name)}">${esc(file.name.replace(/^docs\//, ""))}</button>`).join("")}</div>`
+    : "";
+  // 两行：第一行标题 + 徽标，右上角是主文件路径与草案说明 / 动作；第二行只有文件 chips（左对齐，可换行）。
+  // 一轮审稿会有 review.md / readers / gap / experts / images / scores 六个 chip，跟标题挤一行会被挤到右侧折成两截，很难读。
   return `<div class="doc-head">
-    <div><div class="eyebrow">Deck Document</div><h2>${esc(doc.label)}</h2></div>
-    ${docBadge(doc.status)}
-    <span class="small doc-file">${esc(doc.primary || "无文件")}</span>
-    ${(doc.files || []).length > 1 ? `<div class="doc-files">${doc.files.map((file) => `<button type="button" class="doc-file-chip${file.name === doc.primary ? " active" : ""}" data-doc-file="${esc(file.name)}" title="${esc(file.name)}">${esc(file.name.replace(/^docs\//, ""))}</button>`).join("")}</div>` : ""}
-    ${extra}
+    <div class="doc-head-top">
+      <div><div class="eyebrow">Deck Document</div><h2>${esc(doc.label)}</h2></div>
+      ${docBadge(doc.status)}
+      <span class="doc-head-side">
+        <span class="small doc-file">${esc(doc.primary || "无文件")}</span>
+        ${extra ? `<span class="doc-head-extra">${extra}</span>` : ""}
+      </span>
+    </div>
+    ${chips ? `<div class="doc-head-row">${chips}</div>` : ""}
   </div>`;
 }
 
@@ -1650,6 +1806,7 @@ function renderDoc(doc, index) {
         })()}
         ${bodyText ? `<div class="page-content md${placeholderContent ? " is-placeholder" : ""}">${placeholderContent ? esc(bodyText) : mdToHtml(bodyText)}</div><p class="density-line">${densityBadge("body", bodyText)}</p>` : `<p class="engine-note">（这页没有正文）</p>`}
         <details class="prompt-details"><summary>提示词（${placeholderPrompt ? "待补" : `${String(promptText).length} 字符`}${densityTarget && !placeholderPrompt ? ` · 目标 ${densityTarget.briefMin}–${densityTarget.briefMax} 字` : ""}）</summary><div class="prompt-quote">${esc(promptText || "（缺提示词）")}${placeholderPrompt ? pendingHint(["visualBrief"]) : ""}</div></details>
+        <details class="prompt-details" data-assembled-prompt="${esc(slide.id)}"><summary>出图时拼装的完整 prompt（含图上文字清单，展开时读取）</summary><div class="prompt-quote" data-assembled-body="${esc(slide.id)}">展开读取…</div></details>
         ${proposalBlock}
       </div></div>`;
     }).join("")}</div>` + docFooter(doc, content);
@@ -1929,6 +2086,29 @@ async function rollbackFirstDraft(revision) {
 }
 
 function bindDocActions(root) {
+  root.querySelectorAll("details[data-assembled-prompt]").forEach((details) => {
+    details.addEventListener("toggle", async () => {
+      if (!details.open) return;
+      const pageId = details.getAttribute("data-assembled-prompt");
+      const body = details.querySelector("[data-assembled-body]");
+      if (!pageId || !body || body.dataset.loaded === "1") return;
+      const deckId = STATE.data?.active?.deckId;
+      if (!deckId) return;
+      body.textContent = "读取中…";
+      try {
+        const res = await fetch(`/api/deck-studio.page-prompt?` + new URLSearchParams({ deckId, pageId }), { headers: { accept: "application/json" } });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data?.ok && data.prompt) {
+          body.textContent = data.prompt;
+          body.dataset.loaded = "1";
+        } else {
+          body.textContent = `读取失败：${data?.error?.message || "未知错误"}`;
+        }
+      } catch (error) {
+        body.textContent = `读取失败：${String(error?.message ?? error)}`;
+      }
+    });
+  });
   root.querySelectorAll("[data-doc-file]").forEach((btn) => btn.addEventListener("click", () => {
     const file = btn.getAttribute("data-doc-file") || "";
     if (file) openDocFile(STATE.tab, file);
@@ -4678,6 +4858,10 @@ function backToManual(box) {
   }
   getEl("embedBack").addEventListener("click", () => window.parent?.postMessage({ type: "dsh-deck-studio:close" }, "*"));
   await loadWorkbench();
+  absorbUpdate(STATE.data);
+  getEl("settingsBtn").addEventListener("click", openSettingsPanel);
+  getEl("updateBtn").addEventListener("click", checkPluginUpdate);
+  getEl("repoBtn").addEventListener("click", openRepo);
   await refreshSessions();
   getEl("save").textContent = EMBED ? "对话在 DSH 原生 Chat" : "对话在左侧 · DSH 原生";
   // F-69：只有 profile 开了 hideShellSidebar，宿主左侧栏才会默认收起；此时顶栏给一个切换入口。

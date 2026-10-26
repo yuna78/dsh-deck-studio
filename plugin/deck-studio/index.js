@@ -11,7 +11,8 @@
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { execFile } from "node:child_process";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { PLUGIN_DIR, mergeConfig, repoRootFrom } from "./lib/config.js";
 import { createRuntimeStore } from "./lib/store.js";
 import { createDeckWorkspace, scriptSectionRange } from "./lib/deck-workspace.js";
@@ -33,7 +34,26 @@ import { appendSampleRecord, readSampleRecords, readStyleDefinition, writeStyleD
 import { resolveMediaFile, scanDesignStyles, scanResources } from "./lib/home-catalog.js";
 import { defaultSelection, renderModelPayload, resolveSelection } from "./lib/render-nodes.js";
 import { applyRenderSettings, readRenderSettings, renderSettingsPayload, saveRenderSettings } from "./lib/render-settings.js";
-import { editEndpointFor, selectRenderer } from "./lib/render.js";
+import { buildPrompt, editEndpointFor, selectRenderer } from "./lib/render.js";
+import { readDeckBrief } from "./lib/deck-brief.js";
+import { detectProfileDir, installModeOf, isNewer, latestFromRegistry, repoLinksOf } from "./lib/update-check.js";
+
+/** 跑一个外部命令（异步、带超时、合并 stdout/stderr；失败时把输出带进错误信息）。 */
+function runCommand(command, args, { cwd = "", timeoutMs = 120000 } = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { cwd: cwd || undefined, timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, env: process.env }, (error, stdout, stderr) => {
+      const output = `${stdout ?? ""}${stderr ?? ""}`.trim();
+      if (error) {
+        const failure = new Error(`${command} ${args.join(" ")} 失败：${error.message}${output ? `
+${output.slice(-2000)}` : ""}`);
+        failure.output = output;
+        reject(failure);
+        return;
+      }
+      resolve(output);
+    });
+  });
+}
 
 /** 稳定 Cordis 插件名。 */
 export const name = "deck-studio";
@@ -51,6 +71,7 @@ export const ROUTES = {
   docfile: "/api/deck-studio.docfile",
   export: "/api/deck-studio.export",
   pageEdit: "/api/deck-studio.page-edit",
+  pagePrompt: "/api/deck-studio.page-prompt",
   pageSave: "/api/deck-studio.page-save",
   media: "/api/deck-studio.media",
   renderModel: "/api/deck-studio.render-model",
@@ -78,6 +99,9 @@ export const ROUTES = {
   manual: "/api/deck-studio.manual",
   manualDoc: "/api/deck-studio.manual-doc",
   docsAsset: "/api/deck-studio.docs-asset",
+  // F-188：顶栏「更新」按钮——查 npm 最新版 / 一键更新到最新版（只在 npm 安装模式下执行）
+  updateCheck: "/api/deck-studio.update-check",
+  update: "/api/deck-studio.update",
 };
 
 /** 出图资产 MIME（image deck 只有图片；svg 仅 fake 测试用）。 */
@@ -197,6 +221,117 @@ function pluginVersion() {
   }
   return versionCache;
 }
+
+  /** 插件自己的 package.json（版本 / 仓库链接来源；只读一次）。 */
+  let pluginMetaCache = null;
+  function pluginMeta() {
+    if (pluginMetaCache) return pluginMetaCache;
+    let pkg = {};
+    try {
+      pkg = JSON.parse(readFileSync(join(PLUGIN_DIR, "package.json"), "utf8"));
+    } catch {
+      pkg = {};
+    }
+    pluginMetaCache = {
+      name: String(pkg.name ?? "dsh-plugin-deck-studio"),
+      version: String(pkg.version ?? pluginVersion()),
+      links: repoLinksOf(pkg),
+    };
+    return pluginMetaCache;
+  }
+
+  /** 本机 profile 目录：先按插件真实路径反推（npm 布局），再退回 DSH 注入的 env。 */
+  function profileDirHint() {
+    const env = typeof process !== "undefined" ? process.env : {};
+    const meta = pluginMeta();
+    const found = detectProfileDir({ pluginDir: PLUGIN_DIR, packageName: meta.name, env });
+    if (found) return found;
+    const home = env.DSH_HOME ? String(env.DSH_HOME) : "";
+    const profile = env.DSH_PROFILE ? String(env.DSH_PROFILE) : "";
+    return home && profile ? join(home, "profiles", profile) : "";
+  }
+
+  /** 更新相关的静态信息（不发网络请求；workbench 首屏用）。 */
+  function updateBrief() {
+    const meta = pluginMeta();
+    const install = installModeOf({ profileDir: profileDirHint(), packageName: meta.name });
+    const env = typeof process !== "undefined" ? process.env : {};
+    return {
+      currentVersion: meta.version,
+      installMode: install.mode,
+      installSpec: install.spec,
+      installReason: install.reason,
+      profile: (() => {
+        const dir = profileDirHint();
+        return dir ? basename(dir) : String(env.DSH_PROFILE ?? "");
+      })(),
+      repo: meta.links.repo,
+      issues: meta.links.issues,
+      suggest: meta.links.suggest,
+      registry: `https://registry.npmjs.org/${encodeURIComponent(meta.name)}`,
+    };
+  }
+
+  /** 查 npm 上的最新版本（6s 超时；离线 / 超时不抛，只在 payload 里报错）。 */
+  async function updateStatus() {
+    const brief = updateBrief();
+    const payload = { ...brief, latestVersion: "", hasUpdate: false, checkedAt: new Date().toISOString(), error: "" };
+    try {
+      const res = await fetch(`${brief.registry}/latest`, {
+        headers: { accept: "application/json" },
+        signal: AbortSignal.timeout(12000),
+      });
+      if (!res.ok) throw new Error(`registry HTTP ${res.status}`);
+      const latest = latestFromRegistry(await res.json());
+      if (!latest) throw new Error("registry 返回里没有 latest 版本");
+      payload.latestVersion = latest;
+      payload.hasUpdate = isNewer(latest, brief.currentVersion);
+      payload.command = brief.installMode === "npm"
+        ? `dsh plugin --profile ${brief.profile || "<profile>"} add ${pluginMeta().name}@${latest}`
+        : "";
+      if (brief.installMode === "linked") payload.note = "本机是开发链接安装，更新走仓库（git pull）；界面不执行 pnpm。";
+    } catch (error) {
+      const message = String(error?.message ?? error);
+      const timedOut = error?.name === "TimeoutError" || /abort|timeout/i.test(message);
+      payload.error = timedOut
+        ? "检查更新超时：连不上 npm registry（网络 / 代理问题），可以直接用命令手动更新。"
+        : `检查更新失败：${message}`;
+    }
+    return payload;
+  }
+
+  /** 一键更新：npm 安装模式下在 profile 目录跑 pnpm add <name>@<latest>（超时 240s）。 */
+  async function runSelfUpdate() {
+    const brief = updateBrief();
+    if (brief.installMode !== "npm") {
+      throw new Error(
+        brief.installMode === "linked"
+          ? "本机是开发链接安装（link:/file:），界面不执行更新；请在仓库里 git pull 后重启 DSH。"
+          : "没识别出 profile 的安装方式，无法自动更新；请手动执行 dsh plugin --profile <profile> add dsh-plugin-deck-studio@latest。",
+      );
+    }
+    const status = await updateStatus();
+    if (status.error) throw new Error(status.error);
+    if (!status.latestVersion) throw new Error("没查到 npm 上的最新版本");
+    const target = `${pluginMeta().name}@${status.latestVersion}`;
+    const output = await runCommand("pnpm", ["add", target], { cwd: brief.profile, timeoutMs: 240000 });
+    store.recordEvent({
+      type: "plugin.update",
+      deckId: "",
+      actor: "user",
+      status: "succeeded",
+      payload: { from: brief.currentVersion, to: status.latestVersion, target },
+    });
+    return {
+      ok: true,
+      from: brief.currentVersion,
+      to: status.latestVersion,
+      target,
+      restarted: false,
+      restartHint: "更新已写入 profile，重启 DSH 后生效（当前进程仍是旧版本）。",
+      output,
+    };
+  }
 
 function json(payload, status = 200) {
   return Response.json(payload, { status, headers: { "cache-control": "no-store" } });
@@ -1465,6 +1600,39 @@ export function createService(config, logger, env = process.env) {
   }
 
   /**
+   * F-189：某页「拼装后的完整出图 prompt」（只读，脚本页折叠展示用）。
+   * 与出图工具同一套拼装：deck 关联 design 的 styleBrief + 图上文字清单 + 讲述用正文 + 画面要求。
+   */
+  function pagePrompt(deckId, pageId) {
+    const adapter = adapterOf(deckId);
+    if (!adapter?.available()) return null;
+    const deck = workspace.manifest(deckId);
+    const normalized = String(pageId ?? "").trim();
+    const slide = (deck?.slides ?? []).find((item) => item.id === normalized || `p${String(item.order).padStart(2, "0")}` === normalized);
+    if (!slide) return null;
+    let styleBrief = config.styleBrief;
+    const association = designRegistry.deckDesignFor(deckId);
+    const design = association?.designId ? designRegistry.findDesign(association.designId) : null;
+    if (design) {
+      let definition = null;
+      try {
+        definition = readStyleDefinition(adapter.sourceRoot, design.abbr ?? "", design);
+      } catch {
+        definition = null;
+      }
+      const brief = String(design.styleBrief || definition?.styleBrief || definition?.description || design.description || "").trim();
+      const constraints = String(design.constraints || definition?.constraints || "").trim();
+      if (brief) styleBrief = [brief, constraints ? `不要什么：${constraints}` : ""].filter(Boolean).join("\n");
+    }
+    return {
+      deckId,
+      pageId: slide.id,
+      design: design?.abbr ?? null,
+      prompt: buildPrompt(slide, styleBrief, { brief: readDeckBrief(adapter.sourceRoot) }),
+    };
+  }
+
+  /**
    * 页面微调保存：写回源 script.md / prompts/Pnn.txt，重建 manifest，并自动 git 提交。
    * 这是唯一允许直接写源 deck 的动作（ADR-0006 的例外，见 ADR-0008）。
    */
@@ -2105,6 +2273,8 @@ export function createService(config, logger, env = process.env) {
       designProjects: designProjects(),
       bindings: listBindings(),
       proposals: base.pendingProposals,
+      // F-188：顶栏「更新 / GitHub」按钮首屏数据（不打网络，检查更新另调 update-check）
+      update: updateBrief(),
     };
   }
 
@@ -2114,7 +2284,7 @@ export function createService(config, logger, env = process.env) {
     bootstrapDesignStyles();
   }
 
-  return { config, store, workspace, adapters, status, state, workbench, readManual, readUserName: () => config.userName, saveUserName, readDoc, docsAsset, setDeckDensity, renderSettings, saveRenderConfig, isLocalDeck: (deckId) => localDeckIds().has(String(deckId ?? "")), assetFile, slideRenderInfo, deckCoverUrl, deckRevisions, deckDocs, deckDoc, deckDocsScaffold, deckDocFile, pageForEdit, savePage, exportDeckFile, designSamples, sourceFile, homeCatalog, mediaFile, renderState, setRenderSelection, renderRuntime, createDeck, createDesign, createStyleFromDeck, designProjects, designStyle, updateDesignStyle, backfillStyleBriefs, listBindings, bindSession, unbindSession, deleteDesign, deleteDeck, setDeckDesign, addDesignSamples, seedStyleDesigns, renderStatus, exportHandoff }
+  return { config, store, workspace, adapters, status, state, workbench, readManual, readUserName: () => config.userName, saveUserName, readDoc, docsAsset, setDeckDensity, renderSettings, saveRenderConfig, isLocalDeck: (deckId) => localDeckIds().has(String(deckId ?? "")), assetFile, slideRenderInfo, deckCoverUrl, deckRevisions, deckDocs, deckDoc, deckDocsScaffold, deckDocFile, pageForEdit, pagePrompt, savePage, exportDeckFile, designSamples, sourceFile, homeCatalog, mediaFile, renderState, setRenderSelection, renderRuntime, createDeck, createDesign, createStyleFromDeck, designProjects, designStyle, updateDesignStyle, backfillStyleBriefs, listBindings, bindSession, unbindSession, deleteDesign, deleteDeck, setDeckDesign, addDesignSamples, seedStyleDesigns, renderStatus, exportHandoff, updateBrief, updateStatus, runSelfUpdate }
 }
 
 /**
@@ -2188,6 +2358,12 @@ export function apply(ctx, rawConfig) {
   registerRoute(ROUTES.pageEdit, (request) => {
     const url = new URL(request?.url ?? "/", "http://localhost");
     const view = service.pageForEdit(url.searchParams.get("deckId") ?? "", url.searchParams.get("pageId") ?? "");
+    return view ? json({ ok: true, ...view }) : json({ ok: false, error: { message: "page not found" } }, 404);
+  });
+
+  registerRoute(ROUTES.pagePrompt, (request) => {
+    const url = new URL(request?.url ?? "/", "http://localhost");
+    const view = service.pagePrompt(url.searchParams.get("deckId") ?? "", url.searchParams.get("pageId") ?? "");
     return view ? json({ ok: true, ...view }) : json({ ok: false, error: { message: "page not found" } }, 404);
   });
 
@@ -2414,6 +2590,19 @@ export function apply(ctx, rawConfig) {
       headers: { "content-type": asset.mime, "cache-control": "public, max-age=300" },
     });
   });
+
+  // F-188：顶栏「更新」按钮——GET 查 npm 最新版（6s 超时，离线只报错不抛）。
+  registerRoute(ROUTES.updateCheck, async () => json({ ok: true, ...(await service.updateStatus()) }), ["GET"]);
+
+  // F-188：一键更新到最新版（只在 npm 安装模式执行；开发链接安装返回 400 说明原因）。
+  registerRoute(ROUTES.update, async (request) => {
+    if ((request?.method ?? "POST").toUpperCase() !== "POST") return json({ ok: false, error: { message: "POST only" } }, 405);
+    try {
+      return json(await service.runSelfUpdate());
+    } catch (error) {
+      return json({ ok: false, error: { message: String(error?.message ?? error) } }, 400);
+    }
+  }, ["POST"]);
 
   registerRoute(ROUTES.faq, (request) => {
     const url = new URL(request?.url ?? "/", "http://localhost");
