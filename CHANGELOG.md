@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.2.11] · 2026-10-29
+
+### 功能
+
+- **插件图标（F-192）**：包根 `package.json` 新增 `"icon": "assets/icon.svg"`，`files` 补 `assets/`。图标就是工作台左上角那枚 mark 的
+  小尺寸版（去掉最淡的底层卡片、两道文字条加粗、星芒放大——原样缩到 36px 会糊成一块灰）。宿主读包内文件 → base64 数据 URI →
+  36px 画在 48px 框里，DSH「插件」面板与组合包卡片不再显示默认插画。声明有硬约束（包内相对路径、`svg/png/jpeg/webp`、≤256KiB、
+  必须在 `files` 里），错了宿主**静默**回退默认插画——所以 `verify/smoke.mjs` 加了图标契约（105 项）：路径 / 存在 / 体积 / 扩展名 /
+  白名单覆盖 / 与顶栏同一套渐变。
+- 上游配套：[awesome-dsh-plugin#10371](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/10371)——市场索引透传条目 `icon`，
+  让「发现」卡片也能显示插件自己的图；该 PR 合并前，市场里的插件仍统一显示默认插画。
+
+### 修复与配置
+
+- `smoke` 的 git 留痕用例显式设置 `core.hooksPath=.git/hooks`：本机全局 hooksPath（devline 的 `.githooks`）会让临时仓库里的
+  `pre-commit` 失效，导致「hook 拒绝时 commit 必须失败」这条假失败。
+
 ## [0.2.10] · 2026-10-26
 
 > 正式发布版。`0.2.9` 曾在 npm 上发过一次中间态快照（缺 F-190 反装饰纪律与 README 改版），

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="512" height="512">
+      <defs>
+        <linearGradient id="dlbg" x1="4" y1="2" x2="60" y2="62" gradientUnits="userSpaceOnUse"><stop stop-color="#0e5563"/><stop offset="1" stop-color="#08343d"/></linearGradient>
+        <linearGradient id="dlgold" x1="40" y1="8" x2="58" y2="26" gradientUnits="userSpaceOnUse"><stop stop-color="#e8b45c"/><stop offset="1" stop-color="#c5882f"/></linearGradient>
+        <linearGradient id="dlcard" x1="18" y1="16" x2="50" y2="44" gradientUnits="userSpaceOnUse"><stop stop-color="#fffdf8"/><stop offset="1" stop-color="#efe8d9"/></linearGradient>
+      </defs>
+      <rect width="64" height="64" rx="16" fill="url(#dlbg)"/>
+      <rect x="15" y="26" width="34" height="21" rx="3.5" fill="#faf8f2" opacity=".55" transform="rotate(-5 32 36.5)"/>
+      <rect x="17" y="17" width="34" height="22" rx="3.5" fill="url(#dlcard)"/>
+      <rect x="22" y="23" width="19" height="3.2" rx="1.6" fill="#0f6975"/>
+      <rect x="22" y="29" width="12" height="2.8" rx="1.4" fill="#1496a8" opacity=".85"/>
+      <path d="M48.5 8.5l2.5 6 6 2.5-6 2.5-2.5 6-2.5-6-6-2.5 6-2.5z" fill="url(#dlgold)"/>
+    </svg>

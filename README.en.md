@@ -50,7 +50,7 @@ Open the `http://127.0.0.1:13090/?token=…` URL printed in the terminal — tha
 DSH-native chat on the left, full-page image storyboard in the middle, document library on the right.
 
 Once installed you don't need to remember commands: the header keeps three buttons on the right —
-**⚙** jumps to the settings panel (render node / model / size), **↻ v0.2.10** checks npm for a newer release
+**⚙** jumps to the settings panel (render node / model / size), **↻ v0.2.11** checks npm for a newer release
 (one click runs `dsh plugin add`; restart DSH to apply), and **GitHub** opens the repo's new-issue page. A `link:` / `file:` development install is recognised and never
 auto-updated (it would replace your local link), it just explains to pull the repo instead.
 
@@ -205,7 +205,7 @@ asked to invent them.
 
 ## Status
 
-- Current version: `v0.2.10` (usable; API may still change)
+- Current version: `v0.2.11` (usable; API may still change)
 - License: **MIT** (see [LICENSE](LICENSE))
 
 ## License

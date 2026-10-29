@@ -32,7 +32,7 @@
 dsh --profile deckline --from-default-profile web
 
 # 2) 安装插件（直发 npm 包，无 scope）
-dsh plugin --profile deckline add dsh-plugin-deck-studio@0.2.10
+dsh plugin --profile deckline add dsh-plugin-deck-studio@0.2.11
 #   git 方式：dsh plugin --profile deckline add "github:yuna78/dsh-deck-studio#path:/plugin/deck-studio"
 #   本地开发：dsh plugin --profile deckline add "$PWD/plugin/deck-studio"
 
@@ -158,7 +158,7 @@ Designs 页 **＋ 添加风格** → 填名称 / 缩写 / 画面描述 → **在
 
 ### 更新插件 / 提建议
 
-装好之后不用记命令：工作台顶栏右侧三个按钮——**⚙** 直接切到右栏设置页，**↻ v0.2.10** 点一下就去 npm 查最新版，**GitHub** 去仓库提建议。
+装好之后不用记命令：工作台顶栏右侧三个按钮——**⚙** 直接切到右栏设置页，**↻ v0.2.11** 点一下就去 npm 查最新版，**GitHub** 去仓库提建议。
 
 - 有新版：弹一句「当前 vX → vY」，点「更新」直接跑 `dsh plugin add`，跑完提示重启 DSH（更新写在 profile 里，运行中的进程还是旧版本）。
 - 已是最新：提示「已是最新版本 vX」。
@@ -215,7 +215,7 @@ deck 源（intent / script / 画面说明），随仓库分发，可直接拿来
 
 ## 状态
 
-- 当前版本：`v0.2.10`（可用，API 仍可能小改）
+- 当前版本：`v0.2.11`（可用，API 仍可能小改）
 - License：**MIT**（见 [LICENSE](LICENSE)）
 
 ## License
