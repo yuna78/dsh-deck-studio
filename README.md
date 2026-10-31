@@ -40,8 +40,12 @@ dsh plugin --profile deckline add dsh-plugin-deck-studio@0.2.11
 dsh --profile deckline --port 13090
 ```
 
+> 第 1 步不能省：`deckline` profile 不会自动创建，直接启动会报 `profile "deckline" does not exist`。
+> 3080 是默认 `web` profile、13090 是 `deckline` profile；**换端口不改数据，换 `dataRoot` 才改数据**（见 [docs/install.md](docs/install.md) §3）。
+
 浏览器打开终端打印的 `http://127.0.0.1:13090/?token=…` —— 进去就是**工作台主页**（Decks / Designs / 资源库 / Conversations）；
 顶栏右上角有三个常驻按钮：**⚙ 设置**（出图节点 / 模型 / 尺寸）、**↻ 更新**（点了查 npm 最新版，有新版弹确认直接更新，重启 DSH 生效）、**GitHub**（去仓库提建议 / 报问题）；
+首页左栏底部还有一个常驻的 **关于** 入口（显示当前版本，有新版会亮小圆点）：一页里从上到下是作者、微信公众号（二维码）、版本与更新、开源地址与反馈、其他开源项目；
 点一个 deck 进入**左中右三栏**：左栏 DSH 原生 Chat、中间整页图片 storyboard、右边资料库。
 
 详细步骤、git 子目录安装、排障见 **[docs/install.md](docs/install.md)**。
@@ -159,6 +163,7 @@ Designs 页 **＋ 添加风格** → 填名称 / 缩写 / 画面描述 → **在
 ### 更新插件 / 提建议
 
 装好之后不用记命令：工作台顶栏右侧三个按钮——**⚙** 直接切到右栏设置页，**↻ v0.2.11** 点一下就去 npm 查最新版，**GitHub** 去仓库提建议。
+首页左栏的 **关于** 页里也有同样入口（检查新版本 / 开源地址 / 提交建议），另有公众号二维码和其他开源项目。
 
 - 有新版：弹一句「当前 vX → vY」，点「更新」直接跑 `dsh plugin add`，跑完提示重启 DSH（更新写在 profile 里，运行中的进程还是旧版本）。
 - 已是最新：提示「已是最新版本 vX」。

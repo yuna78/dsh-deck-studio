@@ -1,5 +1,63 @@
 # Changelog
 
+## [0.2.13] · 2026-10-31
+
+### 功能
+
+- **首页「关于」单页（F-193 / F-194 / F-195）**：左栏「使用手册」下方新增常驻 **关于** 入口——入口上直接显示
+  当前版本 chip，有新版时亮小圆点（升级入口不再只藏在顶栏图标里）。点进去是**一页从上到下**的信息：
+  作者 + 微信公众号（同一块：头像 / 一句话 / 名称 / 资源库二维码）→ 版本与更新（检查新版本）→
+  开源地址与反馈（仓库 / 提 issue）→ 其他开源项目（Deckline / GitHub 主页）。
+  公众号二维码只从运行期资源库（`<dataRoot>/resources`）读取，仓库不携带个人二维码，缺图时降级成配置提示；
+  外链缺地址时 toast 说明，点击不会静默无反应。
+  作者卡最后按反馈做成上下两段式（头像+一句话 / 分隔线 / 公众号名称+二维码），信息不重复。
+
+- **侧栏入口改为面板行（F-197）**：DSH 侧栏的 Deckline 入口从「脚部按钮」换成 `sidebar.panellist` 面板行，
+  和 Plugins / Automation tasks 同形态；图标由 `▦` 字符换成 16px 单色 SVG（叠卡片 + 星芒，`currentColor`
+  跟随深浅色主题），点击仍然直接打开 Deck 工作台。
+
+### 验证
+
+- 契约冒烟 110/110（含 F-193–F-196「关于」静态契约：单入口 / 更新状态共用 / 二维码来源 / 外链兜底）。
+- 真机 e2e 18/18；关于页定向验收 PASS；`audit:ui` 175 有反应 / 0 报错（1 项 design 页既有疑似死按钮，与本次无关）。
+- F-197：13090 真机 DOM 实测侧栏 3 条面板行（Plugins / Automation tasks / Deckline），Deckline 行内
+  1 个 `viewBox="0 0 16 16"` 的单色 SVG、4 个形状，`sidebar.footer.action` 下已无 deck 条目。
+
+## [0.2.12] · 2026-10-29
+
+> 修的是「数据明明出过图，换了个启动方式就全没了」。
+> 一句话口径：**换端口不改数据，换 dataRoot 才改数据。**
+
+### 功能
+
+- **dataRoot 解析优先级（P0）**：`DSH_DECK_DATA_ROOT` > 指针文件 `$DSH_HOME/deckline/location.json`
+  > profile patch `deck-studio.config.dataRoot` > 默认 `$DSH_HOME/deckline`。
+  命中来源（env / pointer / profile / default）在顶栏黄条、设置页第一屏与自检面板直接显示，不再靠猜。
+- **指针文件 `location.json`（P0）**：位置固定在 `$DSH_HOME/deckline/`（不随 dataRoot 配置移动，否则自指），
+  权限 `0600`，只存 `version / dataRoot / projectsRoot / setBy / updatedAt`，不含任何 key；
+  可被顶栏黄条的「切到这个目录」写入——写入前校验目录存在 / 可写 / 这本 deck 的正文确实在里面，
+  写完原地重建服务并重注册工具，**不重启 DSH、不清会话**，切换成功后回到原来那本 deck。
+- **数据四态与顶栏黄条（P0）**：`ok`（正文在）/ `partial`（有图没正文，revision 丢了）/
+  `mismatch`（只剩 `decks/<id>/` 残留，或别处真有这本 deck 的正文）/ `absent`（本地目录里完全没痕迹）。
+  `mismatch` / `partial` 出黄条，并列出最多 3 个候选目录（按 deck 数与图数排序，只列真存着这本 deck 正文的），
+  点一下就切过去；`absent` **不出黄条**——受控源 deck 第一次打开本来就没有工作副本，属正常初始化，
+  只在自检面板里显示「还没初始化」；本机新建 deck 的 `absent` 完全静默（首次打开就该初始化，不是异常）。
+- **自检面板与「复制诊断信息」（P0）**：新增 `GET /api/deck-studio.self-check`，一次给出 dataRoot /
+  projectsRoot / workspacePath / DSH_HOME / 指针文件 / env 覆盖 / 版本 / 出图节点 / 注册与磁盘上的 deck 差集；
+  脱敏诊断文本由后端生成，前端只负责复制，避免两套脱敏口径。
+
+### 行为变化
+
+- **env 与 profile 同时配置 dataRoot 时，env 优先**（此前 profile 里的值对 `dataRoot` 生效）。
+  只配一处的用户不受影响；两处都配过且值不同的老用户会命中 env 指定的目录，
+  启动时打一行 `warn` 留痕：`dataRoot 同时由环境变量与 profile 配置指定，已按 env 生效（env=…，profile=…）`。
+
+### 修复与配置
+
+- **切换闸（P0）**：`POST /api/deck-studio.data-dir` 切换窗口内的新请求立即返回
+  `409 {"error":{"code":"switching"}}`（不排队——排队会把毫秒窗口放大成超时）；切换失败回滚配置、
+  注册表与指针文件，不留「指针指到坏目录」的半截状态。
+
 ## [0.2.11] · 2026-10-29
 
 ### 功能

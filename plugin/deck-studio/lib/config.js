@@ -171,25 +171,29 @@ export function mergeConfig(raw, options = {}) {
     tools: input.tools === true,
     /** preset 子树挂载点设 false（根挂载已注册同路径路由，避免双重注册）。 */
     routes: input.routes !== false,
+    /**
+     * P0：自检面板与黄条要显示「命中来源」，所以这里保留 env / profile 两个原始值。
+     * 生效值按「env > profile > 默认」算；指针文件（$DSH_HOME/deckline/location.json）由
+     * lib/data-dir.js 在服务启动时插到 env 与 profile 之间——本函数保持纯函数、不做 IO。
+     */
+    envDataRoot: expandHome(env.DSH_DECK_DATA_ROOT ?? "", env),
+    profileDataRoot: expandHome(typeof input.dataRoot === "string" ? input.dataRoot.trim() : "", env),
     dataRoot:
-      expandHome(
-        typeof input.dataRoot === "string" && input.dataRoot
-          ? input.dataRoot
-          : (env.DSH_DECK_DATA_ROOT ?? ""),
-        env,
-      ) || defaultDataRoot(env),
+      expandHome(env.DSH_DECK_DATA_ROOT ?? "", env)
+      || expandHome(typeof input.dataRoot === "string" ? input.dataRoot.trim() : "", env)
+      || defaultDataRoot(env),
     /**
      * 新建 deck 项目的落盘根。留空 = <dataRoot>/projects/<id>/source。
      * 与会话 workspacePath 独立；默认数据根不在插件安装目录内。
      * 配置了这个根时，新项目直接建在 `<projectsRoot>/<目录名>/`
      * （script.md / intent.md / style-reference.md / prompts/ 同层，和已有 deck 源结构一致）。
+     * env `DSH_DECK_PROJECTS_ROOT` 优先于 profile（与 dataRoot 同一口径）。
      */
-    projectsRoot: expandHome(
-      typeof input.projectsRoot === "string" && input.projectsRoot.trim()
-        ? input.projectsRoot.trim()
-        : (env.DSH_DECK_PROJECTS_ROOT ?? ""),
-      env,
-    ),
+    envProjectsRoot: expandHome(env.DSH_DECK_PROJECTS_ROOT ?? "", env),
+    profileProjectsRoot: expandHome(typeof input.projectsRoot === "string" ? input.projectsRoot.trim() : "", env),
+    projectsRoot:
+      expandHome(env.DSH_DECK_PROJECTS_ROOT ?? "", env)
+      || expandHome(typeof input.projectsRoot === "string" ? input.projectsRoot.trim() : "", env),
     decks,
     render,
     styleBrief:

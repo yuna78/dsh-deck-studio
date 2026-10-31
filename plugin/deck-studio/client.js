@@ -5,8 +5,8 @@
  * 数据全部由宿主半聚合好（浏览器半只做展示，不重算业务口径）。
  *
  * 形态：主区「Deck 工作台」面板（iframe 复用 /api/deck-studio.app?embed=1）。
- * 启动后自动打开（零点击进入），左侧 foote 只保留一个「Deckline」入口用于重新打开；
- * 不再注册右侧 dockkit 观测标签页（F-63：入口太多且丑）。
+ * 启动后自动打开（零点击进入），侧栏只保留一个带图标的「Deckline」面板入口（与其它插件同形态）；
+ * 不再注册右侧 dockkit 观测标签页（F-63：入口太多且丑），也不再占用侧栏脚部按钮。
  * 宿主没有 layout 主区面板契约时降级为 main 面板 + sidebar.panellist。
  *
  * Chatbox 说明（ADR-0006 D1）：对话入口就是 DSH 原生 Chat——选择
@@ -235,9 +235,34 @@ div[data-sidebar-collapsed]{grid-template-columns:0px minmax(0px,1fr) 0px!import
       );
     }
 
-    /** 侧栏 glyph（降级 panellist / footer 用）。 */
-    function DeckGlyph() {
-      return h("span", { style: { fontSize: 13 } }, "▦");
+    /** 侧栏图标（panellist 行用）：叠卡片 + 星芒，单色 currentColor，跟随主题深浅色。 */
+    function DeckGlyph({ size }) {
+      const edge = size || 16;
+      return h("svg", {
+        width: edge,
+        height: edge,
+        viewBox: "0 0 16 16",
+        fill: "none",
+        "aria-hidden": "true",
+        style: { display: "block" },
+      },
+        h("rect", {
+          x: 4.8, y: 2.4, width: 8.2, height: 6.2, rx: 1.5,
+          stroke: "currentColor", strokeWidth: 1.2, opacity: 0.55,
+        }),
+        h("rect", {
+          x: 2.4, y: 5.2, width: 9.2, height: 6.8, rx: 1.6,
+          stroke: "currentColor", strokeWidth: 1.35,
+        }),
+        h("path", {
+          d: "M4.6 7.6h4.6M4.6 9.6h3",
+          stroke: "currentColor", strokeWidth: 1.2, strokeLinecap: "round",
+        }),
+        h("path", {
+          d: "M12.5 9.9l.45 1.15 1.15.45-1.15.45-.45 1.15-.45-1.15-1.15-.45 1.15-.45z",
+          fill: "currentColor",
+        }),
+      );
     }
 
     function MainPanel() {
@@ -535,17 +560,16 @@ div[data-sidebar-collapsed]{grid-template-columns:0px minmax(0px,1fr) 0px!import
           return () => window.clearTimeout(timer);
         }, "deck-studio: auto-open workbench");
 
-        // 唯一入口：侧栏脚部一个「Deckline」按钮（重新打开工作台）；→ 对话用工作台里的「← 回到对话」。
+        // 唯一入口：侧栏面板行「Deckline」（与 plugins / schedules 等插件同一种形态，带图标）；
+        // → 对话用工作台里的「← 回到对话」。
         if (hasRightbar) {
-          ctx.effect(
-            () => ctx.slots.inject("sidebar.footer.action", () =>
-              ctx.slots.register({ name: "sidebar.footer.action", id: `${PLUGIN_ID}-workbench` }, (props) => {
-                const button = h("button", { onClick: openWorkbench, title: "打开 Deck 工作台（对话在 DSH 原生 Chat）", style: { cursor: "pointer" } },
-                  h("span", { style: { fontSize: 13 } }, "▤"), props?.wide ? h("span", { style: { marginLeft: 4 } }, "Deckline") : null);
-                return button;
-              })),
-            "deck-studio: workbench footer button",
-          );
+          if (layout?.selectPanel) {
+            ctx.effect(
+              () => ctx.slots.inject("sidebar.panellist", () =>
+                ctx.slots.register({ name: "sidebar.panellist", id: WORKBENCH_KEY, order: 46, label: () => "Deckline" }, DeckGlyph)),
+              "deck-studio: workbench sidebar entry",
+            );
+          }
           ctx.logger?.info?.("deck-studio client: workbench-only mode");
         } else {
           ctx.effect(

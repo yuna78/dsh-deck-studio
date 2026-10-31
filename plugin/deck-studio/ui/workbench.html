@@ -67,6 +67,20 @@
 .manual-page figure.doc-figure { margin: 16px 0 20px; }
 .manual-page figure.doc-figure img { max-width: 100%; min-height: 160px; background: #f4f2ea; border: 1px solid var(--line, #e3e1d8); border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,.05); }
 .manual-page figure.doc-figure figcaption { font-size: 12px; color: var(--ink-3, #8a8a80); margin-top: 6px; }
+/* P0：数据目录黄条（非模态、不挡操作；事实来自 /api/deck-studio.data-dir） */
+.data-dir-banner{margin:0;padding:10px 18px;border-bottom:1px solid #e0b96a;background:#fdf7e8;color:#6b4b18;font-size:12.5px}
+.data-dir-banner[hidden]{display:none}
+.data-dir-banner-body{display:flex;gap:16px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap}
+.data-dir-banner-main{min-width:0;flex:1 1 520px}
+.data-dir-banner-main b{color:#8a5a00;font-size:13px}
+.data-dir-line{display:block;margin-top:2px;color:#6b6353}
+.data-dir-line code{font-size:12px;background:#fff8ea;border:1px solid #eadcbe;border-radius:4px;padding:1px 5px;word-break:break-all}
+.data-dir-candidate{display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap}
+.data-dir-path{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:#3b4a4d;word-break:break-all}
+.data-dir-count{color:#8a7a58;font-size:11px}
+.data-dir-candidate input{flex:1 1 280px;min-width:200px;padding:4px 8px;border:1px solid #d8c9a8;border-radius:6px;font-size:12px}
+.data-dir-banner-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.data-dir-readonly{font-size:11px;color:#8a5a00}
 </style>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%230f6975'/%3E%3Crect x='15' y='26' width='34' height='21' rx='3.5' fill='%23faf8f2' opacity='.55' transform='rotate(-5 32 36.5)'/%3E%3Crect x='17' y='17' width='34' height='22' rx='3.5' fill='%23faf8f2'/%3E%3Crect x='22' y='23' width='19' height='2.6' rx='1.3' fill='%230f6975'/%3E%3Crect x='22' y='29' width='12' height='2.2' rx='1.1' fill='%231496a8'/%3E%3Cpath d='M48.5 9.5l2.2 5.4 5.4 2.2-5.4 2.2-2.2 5.4-2.2-5.4-5.4-2.2 5.4-2.2z' fill='%23c5882f'/%3E%3C/svg%3E">
 </head>
@@ -108,6 +122,9 @@
   <button id="shellSidebarBtn" title="显示 / 收起 DSH 侧栏（会话 · 插件 · 设置）" hidden>☰ DSH</button>
 </header>
 
+<!-- P0：数据目录黄条（非模态；空时不渲染，见 renderDataDirBanner） -->
+<div id="dataDirBanner" class="data-dir-banner" hidden></div>
+
 <section id="homeView" class="home">
   <aside class="home-nav">
     <button class="btn rail-new home-new-deck" id="newDeckBtn">＋ 新建 Deck</button>
@@ -117,6 +134,11 @@
       <button class="home-nav-item" data-section="resources"><span class="hn-icon">◇</span><span class="hn-label">资源库</span><em id="navCountResources">0</em></button>
       <button class="home-nav-item" data-section="conversations"><span class="hn-icon">☰</span><span class="hn-label">Conversations</span><em id="navCountConvs">0</em></button>
       <button class="home-nav-item" data-section="manual"><span class="hn-icon">?</span><span class="hn-label">使用手册</span></button>
+      <!-- F-193/F-194：关于只留一页入口；版本 chip + 有新版小圆点仍常驻，升级入口不藏在顶栏图标里 -->
+      <div class="home-nav-sep" aria-hidden="true"></div>
+      <button class="home-nav-item" data-section="about" id="aboutNavBtn" title="关于 Deckline：版本 / 公众号 / 开源地址 / 其他项目">
+        <span class="hn-icon">☺</span><span class="hn-label">关于</span><em id="navUpdateVer">—</em><i class="hn-dot" id="navUpdateDot" hidden></i>
+      </button>
     </nav>
   </aside>
   <main class="home-main">
@@ -211,6 +233,35 @@
       <p>以后新 deck 的 owner / 封面作者默认用这个名字，首页也用它打招呼；随时可以在设置里改。</p>
       <div class="field"><label for="nameInput">你的名字</label><input id="nameInput" maxlength="40" placeholder="例如：Yuna" autocomplete="nickname" /></div>
       <div class="confirm-actions"><button type="button" class="btn alt" id="nmLater">稍后</button><button type="submit" class="btn solid">保存</button></div>
+    </form>
+  </div>
+</div>
+
+<!-- P1：首次引导（真·首次才弹：decks 空 && 无 render-settings.json && 无 location.json —— 判定在服务端） -->
+<div id="firstRunModal" class="modal" hidden>
+  <div class="modal-card" style="width:min(620px,94vw)">
+    <div class="modal-head">
+      <div><div class="eyebrow">Welcome</div><h2>先把数据放在哪定下来</h2></div>
+      <button class="modal-close" id="frClose" title="稍后再说">✕</button>
+    </div>
+    <form class="modal-body" id="firstRunForm">
+      <p class="engine-note">换端口不改数据，换 dataRoot 才改数据。这里一次定两件事，之后随时能在设置里改。</p>
+      <label class="field"><span>① 数据放哪（工作副本 / 出图 / 事件）</span>
+        <span class="dir-picker-field"><input id="frDataRoot" autocomplete="off" placeholder="绝对路径，例：/Users/你/.dsh/deckline"><button type="button" class="btn ghost" id="frPickData">选择…</button></span>
+      </label>
+      <label class="field"><span>② 新建 deck 的源放哪（projectsRoot，可留空）</span>
+        <span class="dir-picker-field"><input id="frProjectsRoot" autocomplete="off" placeholder="留空 = 数据目录下的 projects"><button type="button" class="btn ghost" id="frPickProjects">选择…</button></span>
+      </label>
+      <div class="diag-card">
+        <div class="diag-root">数据目录：<code id="frEchoData">—</code></div>
+        <div class="diag-root">源目录：<code id="frEchoProjects">—</code></div>
+        <p class="diag-note">备份就是复制这两个目录。</p>
+      </div>
+      <p class="small" id="frState"></p>
+      <div class="nd-foot"><span class="spacer"></span>
+        <button type="button" class="btn alt" id="frLater">稍后再说</button>
+        <button type="submit" class="btn" id="frSubmit">就用这个位置</button>
+      </div>
     </form>
   </div>
 </div>
@@ -422,6 +473,85 @@
   </div>
 </div>
 
+
+<!-- P2：数据目录自检面板（独立模态；首页 ⚙ / 无 deck / mismatch 时进这里） -->
+<style id="diag-style">
+.diag-card{border:1px solid #e3e1d8;border-radius:10px;padding:12px 14px;margin-bottom:12px;background:#fff}
+.diag-card.is-env{border-color:#e0b96a;background:#fdf7e8}
+.diag-root{font-size:13px;line-height:1.5;word-break:break-all}
+.diag-root code{font-size:12px}
+.diag-src{display:inline-block;margin-left:6px;padding:1px 7px;border-radius:999px;font-size:11px;border:1px solid #cdd6d4;color:#4a5c5a;background:#f4f7f6;white-space:nowrap}
+.diag-src.is-env{border-color:#d8a54a;color:#8a5a00;background:#fdf3dd}
+.diag-note{margin:8px 0 0;font-size:12px;color:#5f6b6d}
+.diag-grid{display:grid;grid-template-columns:132px minmax(0,1fr);gap:4px 10px;font-size:12px;margin:8px 0 0}
+.diag-grid dt{color:#728086}
+.diag-grid dd{margin:0;word-break:break-all;color:#18343b}
+.diag-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px}
+.diag-table{width:100%;border-collapse:collapse;font-size:11.5px;margin-top:8px}
+.diag-table th{text-align:left;color:#728086;font-weight:600;border-bottom:1px solid #e3e1d8;padding:3px 6px;white-space:nowrap}
+.diag-table td{padding:3px 6px;border-bottom:1px dashed #eee7d9;word-break:break-all}
+.diag-bad{color:#b3261e}
+.diag-warn{color:#b3591e}
+.diag-ok{color:#1c7c46}
+.diag-root-chip{margin-left:10px;font-size:11.5px;color:#6b7b7a;cursor:default}
+.diag-root-chip b{color:#0f6975;font-weight:600}
+#diagModal .modal-card{width:min(760px,94vw)}
+#diagModal .modal-body{max-height:72vh;overflow:auto}
+/* P2.5：数据目录选择器（只用 .dir-picker-* 前缀，不碰已有类名） */
+.dir-picker-path{font-size:12.5px;line-height:1.55;word-break:break-all;color:#18343b}
+.dir-picker-path code{font-size:12px}
+.dir-picker-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0 4px}
+.dir-picker-chips{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 12px}
+.dir-picker-chip{border:1px solid #cdd6d4;background:#f4f7f6;border-radius:999px;padding:4px 10px;font-size:12px;color:#3b4a4d;cursor:pointer;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dir-picker-chip:hover{border-color:#0f6975;color:#0f6975}
+.dir-picker-chip.is-current{border-color:#0f6975;background:#e9f4f3}
+.dir-picker-tag{font-size:10.5px;color:#0f6975}
+.dir-picker-count{font-size:10.5px;color:#8a7a58}
+.dir-picker-list{border:1px solid #e3e1d8;border-radius:10px;max-height:42vh;overflow:auto;background:#fff}
+.dir-picker-row{display:flex;gap:10px;align-items:center;width:100%;padding:8px 12px;border:0;border-bottom:1px solid #f2efe6;background:transparent;text-align:left;font-size:12.5px;color:#18343b;cursor:pointer}
+.dir-picker-row:last-child{border-bottom:0}
+.dir-picker-row:hover{background:#f6f9f8}
+.dir-picker-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dir-picker-meta{flex:none;color:#728086;font-size:11px}
+.dir-picker-empty{padding:14px 12px;color:#8a9599;font-size:12px}
+.dir-picker-toggle{display:flex;gap:6px;align-items:center;margin:10px 0 0;font-size:12px;color:#5f6b6d;cursor:pointer}
+.dir-picker-error{margin:10px 0 0;font-size:12px;color:#b3261e;word-break:break-all}
+.dir-picker-field{display:flex;gap:8px;align-items:center}
+.dir-picker-field input{flex:1 1 auto;min-width:0}
+#dirPickerModal .modal-card{width:min(680px,94vw)}
+#dirPickerModal .modal-body{max-height:72vh;overflow:auto}
+</style>
+
+<div id="diagModal" class="modal" hidden>
+  <div class="modal-card">
+    <div class="modal-head">
+      <div><div class="eyebrow">Data Directory</div><h2>当前数据目录与自检</h2></div>
+      <button class="modal-close" id="diagClose" title="关闭">✕</button>
+    </div>
+    <div class="modal-body" id="diagBody"></div>
+    <div class="modal-foot">
+      <button class="btn" id="diagCopy" type="button">复制诊断信息</button>
+      <button class="btn alt" id="diagRefresh" type="button">重新检测</button>
+      <span class="small" id="diagState"></span>
+    </div>
+  </div>
+</div>
+
+<!-- P2.5：数据目录选择器（点目录走，不用手打路径；Esc 关，Enter = 用当前目录） -->
+<div id="dirPickerModal" class="modal" hidden>
+  <div class="modal-card">
+    <div class="modal-head">
+      <div><div class="eyebrow">Pick a folder</div><h2>选择数据目录</h2></div>
+      <button class="modal-close" id="dirPickerClose" title="关闭">✕</button>
+    </div>
+    <div class="modal-body" id="dirPickerBody"></div>
+    <div class="modal-foot">
+      <button class="btn alt" id="dirPickerCancel" type="button">取消</button>
+      <button class="btn" id="dirPickerUse" type="button">用这个目录</button>
+      <span class="small" id="dirPickerState"></span>
+    </div>
+  </div>
+</div>
 
 <!-- F-102：全屏演示层（整页图一页一屏，方向键 / 空格 / PageUp-Down / 滚轮翻页） -->
 <div id="presentOverlay" class="present-overlay" role="dialog" aria-modal="true" aria-label="全屏演示" tabindex="-1" hidden>
@@ -638,6 +768,526 @@ function demoData() {
   };
 }
 
+/* ---------------- 数据目录：自检面板 + 首次引导（P2 / 规格 §3 §5） ----------------
+ * 契约：.deck-assistant-scratch/data-dir-api.md §1 §3 §4
+ * 纪律：根路径 / 命中来源 / 进程 cwd / env 覆盖 / firstRun 全由后端解析，前端只展示、不重算；
+ *       字段缺失时渲染「未知（后端未返回）」，不空白、不编默认值；
+ *       diagnosticsText 由后端生成脱敏文本，前端只复制，不做第二套脱敏。 */
+const DATA_SOURCE_LABEL = { env: "环境变量", pointer: "指针文件", profile: "profile 配置", default: "默认值" };
+const DECK_STATUS_LABEL = {
+  ok: { text: "✓ 有", cls: "diag-ok" },
+  partial: { text: "图片在、正文丢了", cls: "diag-warn" },
+  mismatch: { text: "正文和图片都不在当前目录", cls: "diag-bad" },
+  absent: { text: "还没初始化", cls: "diag-warn" },
+};
+const DIAG_UNKNOWN = "未知（后端未返回）";
+const ENV_READONLY_TEXT = "由环境变量 DSH_DECK_DATA_ROOT 指定（只读）";
+const FIRST_RUN_FLAG = "deckline.firstRunDismissed";
+let FIRST_RUN_MODE = "first-run";
+let DIAG_DATA = null;
+
+/** 归一化后端载荷：兼容 GET self-check（扁平）与 workbench.dataDir（包一层）两种形状。 */
+function readDataDir(data, selfCheck) {
+  const sc = selfCheck && typeof selfCheck === "object" ? selfCheck : null;
+  const wrapped = data && data.dataDir && typeof data.dataDir === "object" ? data.dataDir : null;
+  const src = sc && sc.dataRoot ? sc : (wrapped || {});
+  const config = (data && data.config) || {};
+  const pick = (entry, fallback) => {
+    if (entry && typeof entry === "object") {
+      return {
+        value: String(entry.value ?? ""),
+        effective: String(entry.effective || entry.value || ""),
+        source: String(entry.source || "unknown"),
+        sourceLabel: String(entry.sourceLabel || ""),
+        envOverridden: entry.envOverridden === true,
+        writable: typeof entry.writable === "boolean" ? entry.writable : null,
+        exists: typeof entry.exists === "boolean" ? entry.exists : null,
+      };
+    }
+    return {
+      value: String(fallback ?? ""),
+      effective: String(fallback ?? ""),
+      source: "unknown",
+      sourceLabel: "",
+      envOverridden: false,
+      writable: null,
+      exists: null,
+    };
+  };
+  const env = src.envOverride || (wrapped && wrapped.envOverride) || null;
+  return {
+    dataRoot: pick(src.dataRoot, config.dataRoot),
+    projectsRoot: pick(src.projectsRoot, config.projectsRoot),
+    workspacePath: pick(src.workspacePath, data && data.workspacePath),
+    dshHome: pick(src.dshHome, ""),
+    processCwd: String(src.processCwd || ""),
+    pointerFile: src.pointerFile || (wrapped && wrapped.pointerFile) || null,
+    envOverride: { active: env ? env.active === true : false, name: String((env && env.name) || "DSH_DECK_DATA_ROOT") },
+    firstRun: src.firstRun === true || Boolean(wrapped && wrapped.firstRun),
+    sourceLabel: String(src.sourceLabel || ""),
+    versions: (sc && sc.versions) || {},
+    render: (sc && sc.render) || null,
+    decks: (sc && sc.decks) || src.decks || null,
+    diagnosticsText: String((sc && sc.diagnosticsText) || ""),
+  };
+}
+
+function diagSourceChip(entry) {
+  const label = entry.sourceLabel
+    || (entry.source === "unknown" ? DIAG_UNKNOWN : (DATA_SOURCE_LABEL[entry.source] || entry.source));
+  return `<span class="diag-src${entry.source === "env" ? " is-env" : ""}">${esc(label)}</span>`;
+}
+
+function shortPath(value, max = 44) {
+  const text = String(value ?? "");
+  if (!text) return "—";
+  if (text.length <= max) return text;
+  const head = Math.ceil((max - 1) / 2);
+  return text.slice(0, head) + "…" + text.slice(text.length - (max - 1 - head));
+}
+
+function diagPathCell(entry) {
+  if (!entry.effective) return `<span class="diag-bad">${esc(DIAG_UNKNOWN)}</span>`;
+  const flags = [];
+  if (entry.envOverridden) flags.push('<span class="diag-src is-env">只读</span>');
+  if (entry.writable === false) flags.push('<span class="diag-src is-env">不可写</span>');
+  if (entry.exists === false) flags.push('<span class="diag-src">还没创建</span>');
+  // 未单独配置（projectsRoot 常见）：正文说「沿用默认」，紧跟一行写清真实落盘路径。
+  // 面板只展示后端给的 effective，不在这里拼 <dataRoot>/projects/<deckId>/source。
+  const shown = entry.value
+    ? `<code>${esc(entry.value)}</code>`
+    : `<span class="diag-warn">沿用默认（未单独配置）</span>`;
+  const extra = entry.effective && entry.effective !== entry.value
+    ? `<div class="diag-note">实际落盘：<code>${esc(entry.effective)}</code></div>`
+    : "";
+  return `${shown}${diagSourceChip(entry)}${flags.join("")}${extra}`;
+}
+
+function diagDeckTable(dd, data) {
+  // self-check 给 {registeredCount, items[]}；workbench 的 dataDir.decks 是数组（每项带 status/statusLabel）。
+  const block = dd.decks;
+  let items = null;
+  if (Array.isArray(block)) items = block;
+  else if (block && Array.isArray(block.items)) items = block.items;
+  if (!items || !items.length) {
+    items = ((data && data.decks) || []).map((deck) => ({ deckId: deck.deckId, title: deck.title || deck.label, pageCount: deck.pageCount }));
+  }
+  if (!items.length) return "";
+  const rows = items.map((deck) => {
+    const known = DECK_STATUS_LABEL[deck.status];
+    const text = deck.statusLabel || (known ? known.text : (deck.status || DIAG_UNKNOWN));
+    const cls = known ? known.cls : "diag-warn";
+    const rendered = Number.isFinite(Number(deck.renderedPages))
+      ? `<span class="${Number(deck.renderedPages) > 0 ? "diag-ok" : ""}">${Number(deck.renderedPages)}</span>`
+      : `<span class="diag-warn">${esc(DIAG_UNKNOWN)}</span>`;
+    return `<tr><td><code>${esc(deck.deckId || "")}</code></td><td>${esc(deck.title || deck.label || "")}</td><td>${esc(deck.pageCount ?? "—")}</td><td>${rendered}</td><td class="${cls}">${esc(text)}</td></tr>`;
+  }).join("");
+  return `<table class="diag-table"><thead><tr><th>id</th><th>标题</th><th>页数</th><th>已出图</th><th>script/current.md</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function renderDiagHtml(data, selfCheck) {
+  const dd = readDataDir(data, selfCheck);
+  const countBlock = dd.decks && !Array.isArray(dd.decks) ? dd.decks : null;
+  const counts = countBlock && Number.isFinite(Number(countBlock.registeredCount))
+    ? `注册 ${esc(countBlock.registeredCount)} · 磁盘 ${esc(countBlock.onDiskCount ?? "—")}`
+      + (Array.isArray(countBlock.onlyOnDisk) && countBlock.onlyOnDisk.length ? ` <span class="diag-warn">磁盘多出 ${esc(countBlock.onlyOnDisk.join("、"))}</span>` : "")
+      + (Array.isArray(countBlock.onlyRegistered) && countBlock.onlyRegistered.length ? ` <span class="diag-warn">注册多出 ${esc(countBlock.onlyRegistered.join("、"))}</span>` : "")
+    : (Array.isArray(dd.decks)
+      ? `注册 ${dd.decks.length} · 磁盘 <span class="diag-warn">${esc(DIAG_UNKNOWN)}</span>`
+      : `<span class="diag-warn">${esc(DIAG_UNKNOWN)}</span>`);
+  const renderText = dd.render && dd.render.mode
+    ? `${esc(dd.render.mode)}${dd.render.nodeName ? ` · ${esc(dd.render.nodeName)}` : ""}${dd.render.model ? ` / ${esc(dd.render.model)}` : ""}`
+    : `<span class="diag-warn">${esc(DIAG_UNKNOWN)}</span>`;
+  const envLine = dd.envOverride.active
+    ? `<p class="diag-note diag-warn"><b>${esc(ENV_READONLY_TEXT)}</b>要改请改这个环境变量后重启 DSH。</p>`
+    : "";
+  const pointerLine = dd.pointerFile && dd.pointerFile.path
+    ? `<dt>指针文件</dt><dd><code>${esc(dd.pointerFile.path)}</code> <span class="diag-src">${dd.pointerFile.exists ? "存在" : "尚未创建"}</span>${dd.pointerFile.error ? ` <span class="diag-bad">${esc(dd.pointerFile.error)}</span>` : ""}</dd>`
+    : "";
+  const rows = [
+    `<dt>进程 cwd</dt><dd>${dd.processCwd ? `<code>${esc(dd.processCwd)}</code>` : `<span class="diag-warn">${esc(DIAG_UNKNOWN)}</span>`}</dd>`,
+    `<dt>dataRoot</dt><dd>${diagPathCell(dd.dataRoot)}</dd>`,
+    `<dt>projectsRoot</dt><dd>${diagPathCell(dd.projectsRoot)}</dd>`,
+    `<dt>workspacePath</dt><dd>${diagPathCell(dd.workspacePath)}</dd>`,
+    `<dt>DSH_HOME</dt><dd>${diagPathCell(dd.dshHome)}</dd>`,
+    pointerLine,
+    `<dt>deck：注册 / 磁盘</dt><dd>${counts}</dd>`,
+    `<dt>出图</dt><dd>${renderText}</dd>`,
+    `<dt>版本</dt><dd>插件 ${esc(dd.versions.plugin || (data && data.version) || "—")} · DSH ${esc(dd.versions.dsh || "—")} · Node ${esc(dd.versions.node || "—")}</dd>`,
+  ].filter(Boolean).join("");
+  return `
+    <div class="diag-card${dd.envOverride.active ? " is-env" : ""}">
+      <div class="diag-root"><b>当前数据目录</b>　<code>${esc(dd.dataRoot.value || dd.dataRoot.effective || "—")}</code>${diagSourceChip(dd.dataRoot)}</div>
+      <p class="diag-note">换端口不改数据，换 dataRoot 才改数据。</p>
+      ${envLine}
+      <div class="diag-actions">
+        <button class="btn alt" type="button" id="diagChange"${dd.envOverride.active ? " disabled" : ""}>改数据目录</button>
+        <span class="small">${dd.envOverride.active ? "env 覆盖时不可改（只读）" : "写 location.json，不用重启"}</span>
+      </div>
+    </div>
+    <div class="diag-card"><dl class="diag-grid">${rows}</dl></div>
+    <div class="diag-card"><div class="diag-root">每本 deck</div>${diagDeckTable(dd, data) || '<p class="diag-note">还没有 deck。</p>'}</div>`;
+}
+
+async function refreshDiagnostics() {
+  const stateEl = getEl("diagState");
+  if (stateEl) stateEl.textContent = "正在检测…";
+  let selfCheck = null;
+  try {
+    const fresh = await route("self-check");
+    if (fresh && fresh.ok !== false) selfCheck = fresh;
+  } catch {
+    /* 后端 self-check 未就绪：退回 workbench payload，缺的字段渲染「未知」 */
+  }
+  DIAG_DATA = selfCheck;
+  const box = getEl("diagBody");
+  if (box) box.innerHTML = renderDiagHtml(STATE.data, selfCheck);
+  const text = String((selfCheck && selfCheck.diagnosticsText) || "");
+  const copyBtn = getEl("diagCopy");
+  if (copyBtn) copyBtn.disabled = !text;
+  if (stateEl) stateEl.textContent = text ? "" : "后端还没提供脱敏诊断文本（GET self-check 未就绪），暂无内容可复制";
+}
+
+async function openDiagnostics() {
+  const modal = getEl("diagModal");
+  if (!modal) return;
+  modal.hidden = false;
+  await refreshDiagnostics();
+}
+
+function closeDiagnostics() {
+  const modal = getEl("diagModal");
+  if (modal) modal.hidden = true;
+}
+
+async function copyDiagnostics() {
+  const text = String((DIAG_DATA && DIAG_DATA.diagnosticsText) || "");
+  const stateEl = getEl("diagState");
+  if (!text) { if (stateEl) stateEl.textContent = "没有可复制的诊断文本"; return; }
+  try {
+    await navigator.clipboard.writeText(text);
+    if (stateEl) stateEl.textContent = "已复制（已脱敏，可直接粘贴给他人）";
+    return;
+  } catch {
+    /* 退回落选方案 */
+  }
+  const holder = document.createElement("textarea");
+  holder.value = text;
+  holder.style.position = "fixed";
+  holder.style.opacity = "0";
+  document.body.appendChild(holder);
+  holder.select();
+  try {
+    document.execCommand("copy");
+    if (stateEl) stateEl.textContent = "已复制（已脱敏）";
+  } catch {
+    if (stateEl) stateEl.textContent = "复制失败：浏览器不允许写剪贴板";
+  }
+  holder.remove();
+}
+
+/** 首次引导 / 自检面板「改数据目录」共用同一个表单（markup 见 task-3.3）。 */
+function openDataDirForm(settingsMode = false) {
+  const modal = getEl("firstRunModal");
+  if (!modal) return;
+  const dd = readDataDir(DIAG_DATA || STATE.data);
+  if (dd.envOverride.active) {
+    flash(ENV_READONLY_TEXT, "error");
+    return;
+  }
+  FIRST_RUN_MODE = settingsMode ? "settings" : "first-run";
+  const dataInput = getEl("frDataRoot");
+  const projectsInput = getEl("frProjectsRoot");
+  if (dataInput) dataInput.value = dd.dataRoot.value || dd.dataRoot.effective || "";
+  if (projectsInput) projectsInput.value = dd.projectsRoot.value || "";
+  const submit = getEl("frSubmit");
+  if (submit) submit.textContent = settingsMode ? "保存并重新检测" : "就用这个位置";
+  const stateEl = getEl("frState");
+  if (stateEl) stateEl.textContent = "";
+  syncFirstRunEcho();
+  modal.hidden = false;
+}
+
+function syncFirstRunEcho() {
+  const dataRoot = (getEl("frDataRoot") && getEl("frDataRoot").value.trim()) || "";
+  const projectsRoot = (getEl("frProjectsRoot") && getEl("frProjectsRoot").value.trim()) || "";
+  if (getEl("frEchoData")) getEl("frEchoData").textContent = dataRoot || "—";
+  if (getEl("frEchoProjects")) getEl("frEchoProjects").textContent = projectsRoot || (dataRoot ? dataRoot + "/projects" : "—");
+}
+
+/** 只在真·首次弹：firstRun 由后端判定（decks 空 + 无 render-settings.json + 无 location.json）。 */
+function maybeFirstRun(data) {
+  const dd = readDataDir(data);
+  if (dd.envOverride.active || !dd.firstRun) return;
+  const modal = getEl("firstRunModal");
+  if (!modal || modal.hidden === false) return;
+  try {
+    if (sessionStorage.getItem(FIRST_RUN_FLAG) === "1") return;
+  } catch {
+    /* 隐私模式：当作没标记过 */
+  }
+  openDataDirForm(false);
+}
+
+function dismissFirstRun() {
+  const modal = getEl("firstRunModal");
+  if (modal) modal.hidden = true;
+  try { sessionStorage.setItem(FIRST_RUN_FLAG, "1"); } catch { /* ignore */ }
+}
+
+/** POST data-dir：错误按 code 分支（env-override 409 / not-writable 400 / deck-not-there 409）。 */
+async function submitDataDir(event) {
+  event.preventDefault();
+  const stateEl = getEl("frState");
+  const submit = getEl("frSubmit");
+  const dataRoot = (getEl("frDataRoot") && getEl("frDataRoot").value.trim()) || "";
+  const projectsRoot = (getEl("frProjectsRoot") && getEl("frProjectsRoot").value.trim()) || "";
+  if (!dataRoot) {
+    if (stateEl) stateEl.textContent = "先填数据目录的绝对路径（浏览器拿不到磁盘路径，需要粘贴）";
+    return;
+  }
+  if (submit) submit.disabled = true;
+  if (stateEl) stateEl.textContent = "正在校验并写入 location.json…";
+  try {
+    const res = await fetch("/api/deck-studio.data-dir", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ dataRoot, projectsRoot, setBy: FIRST_RUN_MODE }),
+    });
+    const result = await res.json().catch(() => ({}));
+    if (!res.ok || result.ok === false) {
+      const code = (result.error && result.error.code) || "";
+      if (code === "env-override") throw new Error(ENV_READONLY_TEXT + "，改环境变量后重启 DSH");
+      if (code === "not-writable") throw new Error("这个目录不可写（没有权限或不在可写卷上）：" + dataRoot);
+      if (code === "bad-path") throw new Error("必须是绝对路径（浏览器拿不到磁盘路径，请粘贴完整路径）：" + dataRoot);
+      if (code === "not-found") throw new Error("这个目录不存在：" + dataRoot);
+      if (code === "switching") throw new Error("数据目录切换中，请稍等一秒再点（上一次切换还没落完）");
+      if (code === "deck-not-there") throw new Error("这个目录里没有这本 deck 的数据：" + dataRoot);
+      throw new Error((result.error && result.error.message) || `HTTP ${res.status}`);
+    }
+    getEl("firstRunModal").hidden = true;
+    try { sessionStorage.removeItem(FIRST_RUN_FLAG); } catch { /* ignore */ }
+    STATE.docCache = {};
+    STATE.sig = "";
+    await loadWorkbench(STATE.deckId);
+    if (getEl("diagModal") && getEl("diagModal").hidden === false) await refreshDiagnostics();
+    flash("数据目录已设为 " + ((result.switched && result.switched.to) || dataRoot));
+  } catch (error) {
+    /* 就地报错：不回退默认值、不关闭弹层、保留用户输入（规格 §3） */
+    if (stateEl) stateEl.textContent = "保存失败：" + error.message;
+  } finally {
+    if (submit) submit.disabled = false;
+  }
+}
+
+function bindDataDirUi() {
+  document.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!target || !target.closest) return;
+    if (target.closest("#stOpenDiag")) { openDiagnostics(); return; }
+    if (target.closest("#diagClose")) { closeDiagnostics(); return; }
+    if (target.closest("#diagCopy")) { copyDiagnostics(); return; }
+    if (target.closest("#diagRefresh")) { refreshDiagnostics(); return; }
+    if (target.closest("#diagChange")) { openDirPicker({ mode: "switch" }); return; }
+    if (target.closest("#frLater") || target.closest("#frClose")) { dismissFirstRun(); return; }
+  });
+  const form = getEl("firstRunForm");
+  if (form) form.addEventListener("submit", submitDataDir);
+  ["frDataRoot", "frProjectsRoot"].forEach((id) => {
+    const input = getEl(id);
+    if (input) input.addEventListener("input", syncFirstRunEcho);
+  });
+  const firstRun = getEl("firstRunModal");
+  if (firstRun) firstRun.addEventListener("click", (event) => { if (event.target === firstRun) dismissFirstRun(); });
+  const diag = getEl("diagModal");
+  if (diag) diag.addEventListener("click", (event) => { if (event.target === diag) closeDiagnostics(); });
+}
+
+/* ---------------- 数据目录选择器（P2.5：别再让人手打绝对路径） ----------------
+ * 接口：GET /api/deck-studio.dir-browse?path=<绝对路径> → { ok, dir:{path,parent,isRoot,truncated,dirs:[{name,path,hidden,hasScript,deckCount,isDataRoot}]} }
+ * 错误：400 bad-path / not-found / not-a-dir、409 switching、500 browse-failed —— 按 error.code 分支，message 只做兜底。
+ * 状态：只活在一次弹窗打开期间（DIR_PICKER），关闭即丢弃；每次打开都重新拉接口，不写 STATE、不缓存目录。 */
+// setBy 用既有值 "settings"（后端已认这个枚举）；想在看板里区分「选择器切换」再换成 "dir-picker"，需先确认后端不校验枚举。
+const DIR_PICKER_SWITCH_SETBY = "settings";
+let DIR_PICKER = null;
+
+function dirPickerErrText(code, message, path) {
+  if (code === "bad-path") return "要填绝对路径，例如 /Users/你/.dsh/deckline";
+  if (code === "not-found") return "这个目录不存在：" + (path || "");
+  if (code === "not-a-dir") return "这是一个文件，不是目录：" + (path || "");
+  if (code === "switching") return "数据目录切换中，等一秒再试";
+  if (code === "browse-failed") return "读目录失败：" + (message || "服务端报错，稍后再试");
+  return message || "读取目录失败";
+}
+
+/** 打开选择器：mode=fill 把选中的路径填回某个输入框；mode=switch 直接在线切换。 */
+function openDirPicker(options = {}) {
+  const modal = getEl("dirPickerModal");
+  if (!modal) return;
+  const dd = readDataDir(DIAG_DATA || STATE.data);
+  if (dd.envOverride.active) {
+    // env 覆盖时目录是只读的，选也没用——直接说清楚，不弹一个点不动的界面。
+    flash(ENV_READONLY_TEXT + "，改环境变量后重启 DSH", "error");
+    return;
+  }
+  DIR_PICKER = {
+    mode: options.mode === "switch" ? "switch" : "fill",
+    targetId: options.targetId || "frDataRoot",
+    path: options.path || dd.dataRoot.value || dd.dataRoot.effective || "",
+    data: null,
+    loading: true,
+    error: "",
+    showHidden: false,
+  };
+  modal.hidden = false;
+  renderDirPicker();
+  loadDirPicker(DIR_PICKER.path);
+}
+
+function closeDirPicker() {
+  const modal = getEl("dirPickerModal");
+  if (modal) modal.hidden = true;
+  DIR_PICKER = null;
+}
+
+/** 每次进目录都重新拉接口（不缓存、不猜父子关系，parent 由后端给）。 */
+async function loadDirPicker(path) {
+  if (!DIR_PICKER) return;
+  DIR_PICKER.loading = true;
+  DIR_PICKER.error = "";
+  DIR_PICKER.path = path || DIR_PICKER.path;
+  renderDirPicker();
+  try {
+    const query = DIR_PICKER.path ? "?path=" + encodeURIComponent(DIR_PICKER.path) : "";
+    const res = await fetch("/api/deck-studio.dir-browse" + query, { headers: { accept: "application/json" } });
+    let payload = {};
+    try { payload = await res.json(); } catch { /* 非 JSON 响应走下面兜底 */ }
+    if (!res.ok || !payload?.ok) {
+      const failure = new Error(payload?.error?.message || "HTTP " + res.status);
+      failure.code = payload?.error?.code || "";
+      throw failure;
+    }
+    DIR_PICKER.data = payload.dir || null;
+    DIR_PICKER.path = payload.dir?.path || DIR_PICKER.path;
+  } catch (error) {
+    DIR_PICKER.error = dirPickerErrText(error?.code, error?.message, DIR_PICKER.path);
+    DIR_PICKER.data = null;
+  } finally {
+    DIR_PICKER.loading = false;
+    renderDirPicker();
+  }
+}
+
+/** 渲染弹窗内容（每次都从 DIR_PICKER + 接口返回值算，不保留上一步的 DOM）。 */
+function renderDirPicker() {
+  const body = getEl("dirPickerBody");
+  if (!body || !DIR_PICKER) return;
+  const st = DIR_PICKER;
+  const dir = st.data;
+  const dirs = Array.isArray(dir?.dirs) ? dir.dirs : [];
+  // 有 deck 的目录排前面（最可能是用户要找的那个），当前数据目录额外标「当前」。
+  const chips = dirs
+    .filter((item) => Number(item.deckCount) > 0 || item.isDataRoot)
+    .sort((a, b) => (Number(b.deckCount) || 0) - (Number(a.deckCount) || 0));
+  const chipHtml = chips.length
+    ? `<div class="dir-picker-chips">${chips.map((item) => `<button type="button" class="dir-picker-chip${item.isDataRoot ? " is-current" : ""}" data-dir-path="${esc(item.path)}" title="${esc(item.path)}">📁 ${esc(item.name)}${item.isDataRoot ? ' <span class="dir-picker-tag">当前</span>' : ""}${Number(item.deckCount) > 0 ? ` <span class="dir-picker-count">${Number(item.deckCount)} 本 deck</span>` : ""}</button>`).join("")}</div>`
+    : "";
+  const visible = dirs.filter((item) => st.showHidden || !item.hidden);
+  const rowsHtml = visible.length
+    ? visible.map((item) => `<button type="button" class="dir-picker-row" data-dir-path="${esc(item.path)}" title="${esc(item.path)}"><span class="dir-picker-name">📁 ${esc(item.name)}</span>${Number(item.deckCount) > 0 ? `<span class="dir-picker-meta">${Number(item.deckCount)} 本 deck</span>` : ""}${item.isDataRoot ? '<span class="dir-picker-meta dir-picker-tag">当前数据目录</span>' : ""}</button>`).join("")
+    : `<div class="dir-picker-empty">${dir ? "这个目录下没有子目录。" : "还没读到目录。"}</div>`;
+  const hiddenCount = dirs.filter((item) => item.hidden).length;
+  body.innerHTML = `
+    <div class="dir-picker-path">当前：<code>${esc(dir?.path || st.path || "—")}</code></div>
+    <div class="dir-picker-bar">
+      <button class="btn ghost" type="button" id="dirPickerUp"${dir?.parent ? "" : " disabled"}>↑ 上一级</button>
+      <span class="small">${dir?.truncated ? "子目录太多，只显示了一部分" : ""}</span>
+    </div>
+    ${chipHtml}
+    <div class="dir-picker-list">${rowsHtml}</div>
+    ${hiddenCount > 0 ? `<label class="dir-picker-toggle"><input type="checkbox" id="dirPickerHidden"${st.showHidden ? " checked" : ""}> 显示隐藏目录（${hiddenCount} 个以 . 开头）</label>` : ""}
+    ${st.error ? `<p class="dir-picker-error">${esc(st.error)}</p>` : ""}`;
+  const useBtn = getEl("dirPickerUse");
+  if (useBtn) useBtn.disabled = st.loading || !dir;
+  const stateEl = getEl("dirPickerState");
+  if (stateEl) {
+    stateEl.textContent = st.loading
+      ? "正在读目录…"
+      : st.mode === "switch"
+        ? "选中后立刻切换（不用重启）"
+        : "选中后只填回表单，不会立刻切换";
+  }
+}
+
+/** 点「用这个目录」：fill → 填回输入框；switch → 复用 switchDataDirTo()。 */
+async function confirmDirPicker() {
+  const st = DIR_PICKER;
+  if (!st || st.loading || !st.data) return;
+  const path = st.data.path;
+  if (st.mode === "fill") {
+    const targetId = st.targetId;
+    closeDirPicker();
+    const wizard = getEl("firstRunModal");
+    const wizardOpen = wizard && wizard.hidden === false;
+    if (!wizardOpen) openDataDirForm(true); // 从设置页进来：借首次引导那张表单承接，保存流程完全不变
+    const input = getEl(targetId);
+    if (input) input.value = path;
+    syncFirstRunEcho();
+    const stateEl = getEl("frState");
+    if (stateEl) stateEl.textContent = "已选好目录，点「保存并重新检测」生效。";
+    return;
+  }
+  const useBtn = getEl("dirPickerUse");
+  if (useBtn) useBtn.disabled = true;
+  const stateEl = getEl("dirPickerState");
+  if (stateEl) stateEl.textContent = "正在切换…";
+  const ok = await switchDataDirTo(path, {
+    setBy: DIR_PICKER_SWITCH_SETBY,
+    onError: (error) => {
+      // 失败停在弹窗里（不 flash 掉就没了），按 code 给人话；用户还能换个目录重试。
+      if (!DIR_PICKER) return;
+      DIR_PICKER.error = dirPickerErrText(error?.code, error?.message, path);
+      renderDirPicker();
+    },
+  });
+  if (useBtn) useBtn.disabled = false;
+  if (ok) {
+    closeDirPicker();
+    // 切换后自检面板还开着的话（从 ⚙ →「改数据目录」进来），把表里的路径与 deck 状态一起刷新。
+    const diagOpen = getEl("diagModal");
+    if (diagOpen && diagOpen.hidden === false) await refreshDiagnostics();
+  }
+}
+
+function bindDirPickerUi() {
+  document.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!target || !target.closest) return;
+    if (target.closest("#stPickDir") || target.closest("#frPickData")) { openDirPicker({ mode: "fill", targetId: "frDataRoot" }); return; }
+    if (target.closest("#frPickProjects")) { openDirPicker({ mode: "fill", targetId: "frProjectsRoot" }); return; }
+    if (target.closest("#dirPickerClose") || target.closest("#dirPickerCancel")) { closeDirPicker(); return; }
+    if (target.closest("#dirPickerUse")) { confirmDirPicker(); return; }
+    if (target.closest("#dirPickerUp")) { if (DIR_PICKER?.data?.parent) loadDirPicker(DIR_PICKER.data.parent); return; }
+    const row = target.closest("[data-dir-path]");
+    if (row && row.closest("#dirPickerModal")) { loadDirPicker(row.dataset.dirPath); return; }
+  });
+  document.addEventListener("change", (event) => {
+    const target = event.target;
+    if (target && target.id === "dirPickerHidden" && DIR_PICKER) {
+      DIR_PICKER.showHidden = target.checked === true;
+      renderDirPicker();
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    const modal = getEl("dirPickerModal");
+    if (!modal || modal.hidden) return;
+    if (event.key === "Escape") { event.preventDefault(); closeDirPicker(); return; }
+    if (event.key === "Enter") { event.preventDefault(); confirmDirPicker(); }
+  });
+  const modal = getEl("dirPickerModal");
+  if (modal) modal.addEventListener("click", (event) => { if (event.target === modal) closeDirPicker(); });
+}
+
 /* ---------------- 渲染 ---------------- */
 /** 切右栏标签（Library / Context / Inspector / 设置）。F-131：进 deck、点页面默认给 Inspector。 */
 function activateRightTab(name) {
@@ -717,12 +1367,95 @@ function renderChrome() {
   // 首页右栏给 Library（deck 列表 / 文档）；只有 deck 工作区才默认 Inspector，且不覆盖用户手动选择
   if (STATE.view === "home" && !STATE.rightTab) activateRightTab("library");
   if (STATE.view === "deck" && !STATE.selected && (active.slides || []).length) selectSlide(active.slides[0].id);
+  renderDataDirBanner(data);
+}
+
+/* P0：数据目录黄条（事实由后端 /api/deck-studio.data-dir 给，文案按规格 §2 渲染，非模态不挡操作）。 */
+function renderDataDirBanner(data) {
+  const box = getEl("dataDirBanner");
+  if (!box) return;
+  const dd = data?.dataDir;
+  const banner = dd?.banner;
+  if (!banner?.show) {
+    box.hidden = true;
+    box.innerHTML = "";
+    return;
+  }
+  const envOverride = dd?.envOverride?.active === true;
+  const title = banner.scope === "home" && (banner.affectedDecks ?? 0) > 1
+    ? `⚠ 有 ${banner.affectedDecks} 本 deck 的正文和图片不在当前数据目录`
+    : banner.kind === "partial"
+      ? "⚠ 这本 deck 的图片在，正文（script）丢了"
+      : "⚠ 这本 deck 的正文和图片不在当前数据目录";
+  const currentRoot = dd?.dataRoot?.value || banner.dataRoot || "—";
+  const sourceNote = dd?.sourceLabel ? `（${esc(dd.sourceLabel)}）` : "";
+  const candidates = banner.candidates || [];
+  const rows = candidates.length
+    ? candidates.map((candidate) => `<div class="data-dir-candidate"><span class="data-dir-path">已发现：${esc(candidate.dataRoot)}</span><span class="data-dir-count">（${Number(candidate.deckCount) || 0} 本 deck · ${Number(candidate.imageCount) || 0} 张图）</span><button class="btn ghost" data-data-root="${esc(candidate.dataRoot)}"${envOverride ? " disabled" : ""}>切到这个目录</button></div>`).join("")
+    : `<div class="data-dir-candidate data-dir-empty"><span>没找到这本 deck 的历史数据。如果你在另一个 DSH 实例里出过图，请在那个实例的『设置』里看它显示的数据目录，然后把它填到下面。</span><input id="dataDirManualInput" placeholder="/绝对路径"${envOverride ? " disabled" : ""}><button class="btn ghost" id="dataDirManualSwitch"${envOverride ? " disabled" : ""}>用这个目录</button></div>`;
+  box.innerHTML = `<div class="data-dir-banner-body"><div class="data-dir-banner-main"><b>${title}</b><span class="data-dir-line" title="换端口不改数据，换 dataRoot 才改数据。">当前：<code>${esc(currentRoot)}</code>${sourceNote}</span>${rows}</div><div class="data-dir-banner-actions"><button class="btn ghost" id="dataDirOpenSettings">打开设置</button><button class="btn ghost" id="dataDirCopyDiag">复制诊断信息</button>${envOverride ? `<span class="data-dir-readonly">由环境变量 ${esc(dd?.envOverride?.name || "DSH_DECK_DATA_ROOT")} 指定（只读）</span>` : ""}</div></div>`;
+  box.hidden = false;
+  box.querySelectorAll("[data-data-root]").forEach((node) => node.addEventListener("click", () => switchDataDirTo(node.dataset.dataRoot)));
+  box.querySelector("#dataDirOpenSettings")?.addEventListener("click", () => openSettingsPanel());
+  box.querySelector("#dataDirCopyDiag")?.addEventListener("click", copyDataDirDiagnostics);
+  box.querySelector("#dataDirManualSwitch")?.addEventListener("click", () => {
+    const value = (getEl("dataDirManualInput")?.value || "").trim();
+    if (!value) {
+      flash("先填一个绝对路径", "error");
+      return;
+    }
+    switchDataDirTo(value);
+  });
+}
+
+/** 点「切到这个目录」：写指针 → 后端重建服务 → 重拉工作台（不整页刷新、不清会话）。 */
+async function switchDataDirTo(dataRoot, options = {}) {
+  const deckId = STATE.data?.active?.deckId ?? null;
+  const setBy = options.setBy || "mismatch-banner";
+  try {
+    const res = await fetch("/api/deck-studio.data-dir", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ dataRoot, setBy, deckId }),
+    });
+    let payload = {};
+    try { payload = await res.json(); } catch { /* 非 JSON 响应走下面兜底 */ }
+    if (!res.ok || !payload?.ok) {
+      const failure = new Error(payload?.error?.message || "HTTP " + res.status);
+      failure.code = payload?.error?.code || "";
+      throw failure;
+    }
+    STATE.docCache = {};
+    STATE.sig = "";
+    flash("已切到 " + (payload?.dataDir?.dataRoot?.value || dataRoot));
+    await loadWorkbench(STATE.deckId);
+    if (STATE.view === "home") renderHome();
+    return true;
+  } catch (error) {
+    // 选择器要把 code 翻成人话后留在弹窗里，所以它传 onError 接管提示；其它调用方照旧 flash。
+    if (typeof options.onError === "function") { options.onError(error); return false; }
+    flash("切换失败：" + (error?.message ?? error), "error");
+    return false;
+  }
+}
+
+/** 复制诊断信息：文本由后端 /self-check 生成（脱敏口径只有一份），前端不重拼。 */
+async function copyDataDirDiagnostics() {
+  try {
+    const res = await fetch("/api/deck-studio.self-check", { headers: { accept: "application/json" } });
+    const payload = await res.json();
+    if (!payload?.ok) throw new Error(payload?.error?.message || "自检失败");
+    await navigator.clipboard.writeText(payload.diagnosticsText || "");
+    flash("诊断信息已复制");
+  } catch (error) {
+    flash("复制失败：" + (error?.message ?? error), "error");
+  }
 }
 
 /* ---------------- 首页（左侧导航 + 右侧分区 blocks） ---------------- */
 
-const HOME_SECTIONS = ["decks", "designs", "resources", "conversations", "manual"];
-const HOME_TITLES = { decks: "Decks", designs: "Designs", resources: "资源库", conversations: "Conversations" };
+const HOME_SECTIONS = ["decks", "designs", "resources", "conversations", "manual", "about"];
+const HOME_TITLES = { decks: "Decks", designs: "Designs", resources: "资源库", conversations: "Conversations", manual: "使用手册", about: "关于" };
 
 function homeDateText() {
   const now = new Date();
@@ -803,6 +1536,7 @@ function renderHome() {
     resources: `${resources.length} 个资源（logo / 素材）；点开预览。`,
     conversations: `${sessions.length} 个历史会话；点一个继续聊。`,
     manual: "从新建到导出：截图 + 步骤；找不到就直接在 Chat 里问。",
+    about: "作者 / 公众号 / 版本更新 / 开源地址 / 其他项目，都在这一页。",
   }[section];
   getEl("homeGreetSub").textContent = greet;
 
@@ -822,7 +1556,21 @@ function renderHome() {
     if (STATE.manualDoc) openManualDoc(box, STATE.manualDoc);
     else renderManualHome(box);
   }
+  else if (section === "about") {
+    box.innerHTML = renderHomeAbout(resources);
+    paintUpdate(); // 版本 chip / 更新状态在关于页也要跟着顶栏走（F-193）
+  }
   else box.innerHTML = renderHomeConversations(sessions, bindings);
+
+  // F-193：「关于」分区里的按钮（检查更新 / 外链）——外链直接开新标签。
+  box.querySelectorAll("[data-about-check]").forEach((node) => node.addEventListener("click", () => checkPluginUpdate()));
+  box.querySelectorAll("[data-about-external]").forEach((node) => node.addEventListener("click", () => {
+    const links = aboutLinks();
+    const kind = node.dataset.aboutExternal;
+    if (kind === "repo") openExternalUrl(links.repo, "还没拿到仓库地址");
+    else if (kind === "issues") openExternalUrl(links.issues, "还没拿到提建议地址");
+    else if (kind === "profile") openExternalUrl(links.profile, "还没拿到 GitHub 主页地址");
+  }));
 
   box.querySelectorAll("[data-home-deck]").forEach((node) => node.addEventListener("click", async () => {
     const deckId = node.dataset.homeDeck;
@@ -861,8 +1609,10 @@ function renderHome() {
 }
 
 function renderHomeDecks(decks, active, gov) {
-  if (!decks.length) return `<div class="home-empty">还没有 deck。点左下「＋ 新建 Deck」开始。</div>`;
-  return `<div class="section-head"><h2>Decks</h2><span class="small">${decks.length} 个</span></div>
+  const dd = readDataDir(STATE.data);
+  const rootChip = `<span class="diag-root-chip" title="${esc(dd.dataRoot.value || dd.dataRoot.effective || "数据目录未知")}">当前数据目录 <b>${esc(shortPath(dd.dataRoot.value || dd.dataRoot.effective))}</b>${dd.envOverride.active ? " · env" : ""}</span>`;
+  if (!decks.length) return `<div class="section-head"><h2>Decks</h2><span class="small">0 个</span>${rootChip}</div><div class="home-empty">还没有 deck。点左下「＋ 新建 Deck」开始。</div>`;
+  return `<div class="section-head"><h2>Decks</h2><span class="small">${decks.length} 个</span>${rootChip}</div>
     <div class="home-blocks">${decks.map((deck) => {
       const isActive = deck.deckId === active.deckId;
       // F-52：每张卡用自己的文档状态（后端 decks[].documents / missing / score），
@@ -981,6 +1731,90 @@ function renderHomeResources(resources) {
       </button>`).join("")}</div>`;
 }
 
+/* ---------------- F-193 / F-194：首页「关于」单页（作者 → 公众号 → 版本 → 开源 → 其他项目） ---------------- */
+
+/** 公众号二维码从资源库现取（个人二维码不进仓库）；拿不到就降级成说明，不显示破图。 */
+function aboutWechatQr(resources = []) {
+  return resources.find((resource) => /二维码|qr|微信|wechat/i.test(`${resource?.name || ""} ${resource?.description || ""} ${resource?.url || ""}`)) || null;
+}
+
+function renderHomeAbout(resources = []) {
+  const links = aboutLinks();
+  const qr = aboutWechatQr(resources);
+  const versionLine = UPDATE.current ? `v${UPDATE.current}` : "读取中…";
+  const installNote = UPDATE.installMode === "linked"
+    ? "本机是开发链接安装（link:/file:）：更新走仓库，界面不执行 pnpm。"
+    : UPDATE.installMode === "npm"
+      ? "npm 安装：有新版可以在这里直接更新，重启 DSH 生效。"
+      : "没识别出安装方式时，可手动 dsh plugin add。";
+  const repoShort = links.repo.replace(/^https?:\/\//, "");
+  const projectRows = [
+    { name: "Deckline · dsh-deck-studio", badge: "本插件", external: "repo", desc: "DSH 的 image deck / PPT 工作台：故事线、逐页 prompt、AI 出图与版本留存、风格库、导出 PDF/PPTX。" },
+  ];
+  if (links.profile) {
+    projectRows.push({
+      name: `GitHub @${links.profile.split("/").pop()}`,
+      badge: "全部项目",
+      external: "profile",
+      desc: "我的开源主页：插件、实验和工具会陆续挂在这里。",
+    });
+  }
+  return `<div class="section-head"><h2>关于</h2><span class="small">作者 · 公众号 · 版本更新 · 开源</span></div>
+  <div class="about-stack">
+    <section class="about-card about-hero">
+      <div class="about-profile">
+        <div class="about-avatar" aria-hidden="true">Y</div>
+        <div class="about-profile-body">
+          <h3>${esc(ABOUT.author)}<span class="about-role">${esc(ABOUT.role)}</span></h3>
+          <p class="about-desc">${esc(ABOUT.intro)}</p>
+        </div>
+      </div>
+      <div class="about-wechat">
+        <div class="about-wechat-text">
+          <div class="eyebrow">微信公众号</div>
+          <b>${esc(ABOUT.account)}</b>
+          <p class="about-hint">${qr ? "扫码关注 / 加我微信" : `把二维码图片放进数据目录的 <code>resources/</code>（资源库），这里会自动显示。`}</p>
+        </div>
+        ${qr
+          ? `<img class="about-qr" src="${esc(qr.url)}" alt="${esc(qr.name || "公众号二维码")}" loading="lazy">`
+          : `<div class="about-qr about-qr-empty">二维码未收录</div>`}
+      </div>
+    </section>
+
+    <section class="about-card">
+      <h3>版本与更新</h3>
+      <p class="about-line">当前版本 <b>${esc(versionLine)}</b></p>
+      <p class="about-desc">${esc(installNote)}</p>
+      <div class="about-actions">
+        <button class="btn" data-about-check>检查新版本</button>
+      </div>
+      <p class="small about-state" data-about-state></p>
+    </section>
+    <section class="about-card">
+      <h3>开源地址与反馈</h3>
+      <p class="about-line"><code>${esc(repoShort)}</code></p>
+      <p class="about-desc">用着不对、想要什么功能，直接提 issue；仓库里能看到版本记录与路线。</p>
+      <div class="about-actions">
+        <button class="btn ghost" data-about-external="repo">仓库地址</button>
+        <button class="btn alt" data-about-external="issues">提交建议 / 问题</button>
+      </div>
+    </section>
+    <section class="about-card">
+      <h3>其他开源项目</h3>
+      <ul class="about-project-list">${projectRows.map((row) => `
+        <li class="about-project-row">
+          <div class="about-project-main">
+            <div class="about-project-head"><b>${esc(row.name)}</b><span class="about-badge">${esc(row.badge)}</span></div>
+            <p class="about-desc">${esc(row.desc)}</p>
+          </div>
+          <button class="btn ghost" data-about-external="${esc(row.external)}">打开</button>
+        </li>`).join("")}
+      </ul>
+      <p class="about-hint">最新列表以 GitHub 主页为准；想第一时间看到更新，关注公众号「${esc(ABOUT.account)}」。</p>
+    </section>
+  </div>`;
+}
+
 function renderHomeConversations(sessions, bindings = []) {
   const bound = new Map((bindings || []).map((binding) => [binding.sessionId, binding]));
   const targetLabel = (binding) => {
@@ -1083,19 +1917,55 @@ function dlToast(text, ms = 4200) {
 /** F-188：更新状态（版本 / 安装方式 / 仓库链接）由 workbench payload 带下来。 */
 const UPDATE = { current: "", latest: "", hasUpdate: false, installMode: "", repo: "", suggest: "", note: "" };
 
+/** F-193：左栏「关于」分组用的作者 / 公众号信息；仓库链接优先用包里的 repository，兜底写死公开地址。 */
+const ABOUT = {
+  author: "Yuna",
+  role: "Deckline 作者",
+  account: "Yuna 的 AI 修炼手册",
+  intro: "把 AI 落到工作现场：用对话把分享、培训、汇报做成整页图片 deck。",
+  fallbackRepo: "https://github.com/yuna78/dsh-deck-studio",
+};
+
+function aboutLinks() {
+  const repo = UPDATE.repo || ABOUT.fallbackRepo;
+  const issues = UPDATE.suggest || UPDATE.issues || `${repo.replace(/\/+$/, "")}/issues/new/choose`;
+  const profile = repo.replace(/^https?:\/\/(?:www\.)?github\.com\/([^/]+).*$/i, "https://github.com/$1");
+  return { repo, issues, profile: profile === repo ? "" : profile };
+}
+
+/** 外链统一走这里：拿不到地址时给 toast，不让按钮静默没反应。 */
+function openExternalUrl(url, missingMessage) {
+  if (!url) {
+    dlToast(missingMessage || "链接还没拿到：插件包或运行环境里没有配置地址", 5000);
+    return;
+  }
+  window.open(url, "_blank", "noopener");
+}
+
 function paintUpdate() {
   const ver = getEl("updateVer");
   if (ver) ver.textContent = UPDATE.current ? `v${UPDATE.current}` : "—";
   const dot = getEl("updateDot");
   if (dot) dot.hidden = !UPDATE.hasUpdate;
+  const title = UPDATE.hasUpdate
+    ? `有新版 v${UPDATE.latest}（当前 v${UPDATE.current}）`
+    : UPDATE.installMode === "linked"
+      ? "本机是开发链接安装：更新走 git pull"
+      : "检查更新";
   const btn = getEl("updateBtn");
-  if (btn) {
-    btn.title = UPDATE.hasUpdate
-      ? `有新版 v${UPDATE.latest}（当前 v${UPDATE.current}）`
-      : UPDATE.installMode === "linked"
-        ? "本机是开发链接安装：更新走 git pull"
-        : "检查更新";
-  }
+  if (btn) btn.title = title;
+  // F-193：左栏「检查新版本」与顶栏 ↻ 共用同一份状态（版本 chip + 有新版小圆点）
+  const navVer = getEl("navUpdateVer");
+  if (navVer) navVer.textContent = UPDATE.current ? `v${UPDATE.current}` : "—";
+  const navDot = getEl("navUpdateDot");
+  if (navDot) navDot.hidden = !UPDATE.hasUpdate;
+  const aboutNavBtn = getEl("aboutNavBtn");
+  if (aboutNavBtn) aboutNavBtn.title = UPDATE.hasUpdate ? `关于 Deckline · ${title}` : "关于 Deckline：版本 / 公众号 / 开源地址 / 其他项目";
+  const aboutState = document.querySelectorAll("[data-about-state]");
+  aboutState.forEach((node) => {
+    // 只在「有新版」时占用这行；「当前版本」上面已经写过了，别重复。
+    node.textContent = UPDATE.hasUpdate ? `发现新版 v${UPDATE.latest}（当前 v${UPDATE.current}）` : "";
+  });
 }
 
 function absorbUpdate(payload) {
@@ -1169,7 +2039,8 @@ async function checkPluginUpdate() {
 async function openSettingsPanel() {
   const deckId = STATE.data?.active?.deckId;
   if (!deckId) {
-    dlToast("先在 Decks 里打开一本 deck，右栏就有设置（出图节点 / 模型 / 尺寸）", 6000);
+    // 0 deck / 真·首次 / mismatch：设置内容就是数据目录自检面板，别再 toast 早退。
+    await openDiagnostics();
     return;
   }
   if (STATE.view === "home") await showDeck(deckId);
@@ -2635,7 +3506,25 @@ async function fillInspectorBody(pageId) {
     getEl("insBody").value = view.body || slide.body || "";
     getEl("insPrompt").value = view.prompt || slide.visualBrief || "";
   } catch (error) {
-    if (STATE.selected === pageId) getEl("inspectorStatus").textContent = "读取正文失败：" + error.message;
+    if (STATE.selected !== pageId) return;
+    // 实例指到了不同的 dataRoot 时，这里只会拿到 page not found：
+    // 只说「读取正文失败」会被当成页面 bug，所以带上 dataRoot / deckId 与诊断入口。
+    const insDataDirRoot = STATE.data?.dataDir?.dataRoot;
+    const insDataRoot = (typeof insDataDirRoot === "string" ? insDataDirRoot : insDataDirRoot?.value) || STATE.data?.config?.dataRoot || "（未知，见设置页）";
+    const pageMissing = /page not found/i.test(String(error?.message || ""));
+    getEl("inspectorStatus").innerHTML = pageMissing
+      ? `读取正文失败：当前数据目录没有这本 deck 的 script（dataRoot=${esc(insDataRoot)}，deckId=${esc(deckId)}，pageId=${esc(pageId)}）`
+        + `<br>换端口不改数据，换 dataRoot 才改数据：先核对 ⚙ 里的「当前数据目录」，是不是出图时用的那个。`
+        + `<div style="margin-top:8px"><button type="button" class="btn alt" id="insOpenDiagnostics">打开诊断</button></div>`
+      : `读取正文失败：${esc(String(error?.message || error))}<br>dataRoot=${esc(insDataRoot)}，deckId=${esc(deckId)}，pageId=${esc(pageId)}`;
+    const insDiagBtn = document.getElementById("insOpenDiagnostics");
+    if (insDiagBtn) {
+      insDiagBtn.addEventListener("click", () => {
+        // openDiagnostics() 无 deck 也能开；尚未就绪时退回设置面板
+        if (typeof openDiagnostics === "function") openDiagnostics();
+        else openSettingsPanel();
+      });
+    }
   }
 }
 
@@ -2736,6 +3625,7 @@ function renderSettings(data) {
   const focused = document.activeElement;
   if (SETTINGS_FORM_DIRTY || (focused && focused.closest && focused.closest(".node-editor"))) return;
   const config = data.config || {};
+  const dd = readDataDir(data);
   const renderNodes = data.active?.renderNodes || { nodes: [], active: null };
   const settings = data.renderSettings || {};
   // 设置页里正在编辑的节点列表（以服务端 payload 为种子；保存时整表提交）
@@ -2825,7 +3715,12 @@ function renderSettings(data) {
         仓库和 profile 里都不会出现你的 key 或节点地址。</p>
     </div>
     <h3 class="settings-title">其它</h3>
-    <div class="field"><label>Data root（.deck）</label><input value="${esc(config.dataRoot)}" readonly></div>`;
+    <div class="diag-card${dd.envOverride.active ? " is-env" : ""}">
+      <div class="diag-root">当前数据目录：<code>${esc(shortPath(dd.dataRoot.value || dd.dataRoot.effective, 62))}</code>${diagSourceChip(dd.dataRoot)}</div>
+      <p class="diag-note">换端口不改数据，换 dataRoot 才改数据。</p>
+      ${dd.envOverride.active ? `<p class="diag-note diag-warn">${esc(ENV_READONLY_TEXT)}</p>` : ""}
+      <div class="diag-actions"><button class="btn alt" type="button" id="stOpenDiag">打开自检面板</button><button class="btn" type="button" id="stPickDir">选择…</button></div>
+    </div>`;
   getEl("rsActive")?.setAttribute("title", "当前 deck 生效的节点 / 模型（切换后下一次出图生效）");
   fillSettingsNodeForm();
   bindRenderSettingsForm();
@@ -4859,6 +5754,9 @@ function backToManual(box) {
   getEl("embedBack").addEventListener("click", () => window.parent?.postMessage({ type: "dsh-deck-studio:close" }, "*"));
   await loadWorkbench();
   absorbUpdate(STATE.data);
+  bindDataDirUi();
+  bindDirPickerUi();
+  maybeFirstRun(STATE.data);
   getEl("settingsBtn").addEventListener("click", openSettingsPanel);
   getEl("updateBtn").addEventListener("click", checkPluginUpdate);
   getEl("repoBtn").addEventListener("click", openRepo);
@@ -4878,7 +5776,7 @@ function backToManual(box) {
     getEl("workspaceView").style.display = "grid";
     switchChatToBoundSession().catch(() => {});
   } else {
-    const match = location.hash.match(/^#\/home\/(decks|designs|resources|conversations|manual)/);
+    const match = location.hash.match(/^#\/home\/(decks|designs|resources|conversations|manual|about)/);
     STATE.homeSection = match ? match[1] : "decks";
     showHome();
   }

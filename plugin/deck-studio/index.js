@@ -14,6 +14,8 @@ import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { PLUGIN_DIR, mergeConfig, repoRootFrom } from "./lib/config.js";
+import { DATA_DIR_ENV, dirFacts, dirWritable, pointerWritable, readLocationPointer, resolveDataDir, restoreLocationPointer, writeLocationPointer } from "./lib/data-dir.js";
+import { assessDataDir, buildSelfCheckPayload, dataDirBannerFacts, deckDataHealth, listDataRootDeckIds } from "./lib/data-dir-detect.js";
 import { createRuntimeStore } from "./lib/store.js";
 import { createDeckWorkspace, scriptSectionRange } from "./lib/deck-workspace.js";
 import { createLocalSourceAdapter } from "./lib/source-adapter.js";
@@ -93,6 +95,12 @@ export const ROUTES = {
   sessionBindings: "/api/deck-studio.session-bindings",
   handoff: "/api/deck-studio.handoff",
   sourcefile: "/api/deck-studio.sourcefile",
+  // P0：数据目录（解析结果 / 切换 / 自检）——顶栏黄条与设置页第一屏共用；
+  // 规格：.deck-assistant-scratch/deckline-data-dir-spec.md §2 / §5
+  dataDir: "/api/deck-studio.data-dir",
+  selfCheck: "/api/deck-studio.self-check",
+  // 目录浏览（目录选择器用）：浏览器拿不到绝对路径（webkitdirectory 只给相对路径），只能由后端列目录
+  dirBrowse: "/api/deck-studio.dir-browse",
   // F-140：内置 FAQ（工作台「？帮助」面板与 deck_help 工具同源）
   faq: "/api/deck-studio.faq",
   // F-141：首页「使用手册」——仓库里的 docs/manual.md + 截图，直接在工作台里读
@@ -395,6 +403,17 @@ export function createService(config, logger, env = process.env) {
 
   /** deckId → adapter（workbench / 资产路由共用）。 */
   const adapterOf = (deckId) => adapters.find((adapter) => adapter.id === deckId) ?? null;
+
+  // P0：启动时体检一次（规格 §2「插件启动时（一次）」）：只记事件，不拦渲染。
+  try {
+    noteDataDirTransitions(
+      { config, store },
+      dataDirReportOf({ config, workspace, adapters, env }, { refresh: true }),
+      "startup",
+    );
+  } catch (error) {
+    logger?.warn?.(`${name}: 数据目录体检失败：${error?.message ?? error}`);
+  }
 
   // ── 出图节点 / 模型选择（ADR-0010）────────────────────────────────────────
   /** 当前 deck 的节点选择文件（工作副本；不进 git）。 */
@@ -1981,6 +2000,15 @@ export function createService(config, logger, env = process.env) {
       hideShellSidebar: config.hideShellSidebar === true,
       workspacePath: config.workspacePath,
       dataRoot: config.dataRoot,
+      // P0：自检面板第一行要「数据目录 + 命中来源」；黄条与设置页走同一份体检结果。
+      dataDir: (() => {
+        try {
+          return dataDirStateOf({ config, store, workspace, adapters, env });
+        } catch (error) {
+          logger?.warn?.(`${name}: dataDirState 失败：${error?.message ?? error}`);
+          return null;
+        }
+      })(),
       toolsMounted: config.tools,
       renderMode: config.render.mode,
       renderModel: config.render.model,
@@ -2169,11 +2197,18 @@ export function createService(config, logger, env = process.env) {
       appendixRows: workspace.manifest(deck.deckId)?.appendix?.rows ?? [],
     }));
     const activeId = (requestedDeckId && decks.some((deck) => deck.deckId === requestedDeckId) ? requestedDeckId : null) ?? decks[0]?.deckId ?? workspace.listDeckIds()[0] ?? null;
+    // P0：进 deck 时先体检（规格 §2「进入某本 deck 时，每次，读 manifest 之前」）。
+    // mismatch / partial 时不 ensureDeck：那会凭空建出空的 decks/<id>/，旧图也找不回（禁止项）。
+    const dataDirInfo = dataDirStateOf({ config, store, workspace, adapters, env }, activeId);
+    const activeDataDir = dataDirInfo.active;
+    const dataNotHere = activeDataDir?.status === "mismatch" || activeDataDir?.status === "partial";
+    // 黄条口径（规格 §2）：mismatch / partial / 外部源 absent 都要出条；本机新建 deck 的首次打开静默。
+    const needsBanner = activeDataDir?.needsBanner === true;
     let active = null;
     if (activeId) {
       const adapter = adapterOf(activeId);
       let deck = workspace.manifest(activeId);
-      if (adapter?.available()) {
+      if (adapter?.available() && !dataNotHere) {
         try {
           // ensureDeck 幂等：manifest 缺失时初始化；源变了且本地还没改过时按源刷新派生字段。
           deck = workspace.ensureDeck(adapter, { styleBrief: config.styleBrief });
@@ -2245,10 +2280,16 @@ export function createService(config, logger, env = process.env) {
         designs: designSamples(activeId),
         ...homeCatalog(activeId),
         sourceRoot: adapter?.sourceRoot ?? deck?.source?.root ?? "",
+        // P0：黄条与 Inspector 用的数据目录状态（active 级别）
+        dataDir: activeDataDir,
+        dataDirMismatch: needsBanner,
       };
     }
     return {
       ...base,
+      dataDir: dataDirInfo,
+      // 顶层布尔：这本 deck 在当前 root 需要黄条吗（切换失败回滚后必须是 false）。
+      dataDirMismatch: needsBanner,
       // F-164：会话默认落在哪个目录 / 工作区。npm 布局下 repoRootFrom 会退到插件包内的 seeds/，
       // 不能拿来当会话 cwd（会落到「未分组」）。优先显式配置的 workspacePath，否则用宿主启动目录。
       cwd: config.workspacePath || process.cwd(),
@@ -2287,14 +2328,186 @@ export function createService(config, logger, env = process.env) {
   return { config, store, workspace, adapters, status, state, workbench, readManual, readUserName: () => config.userName, saveUserName, readDoc, docsAsset, setDeckDensity, renderSettings, saveRenderConfig, isLocalDeck: (deckId) => localDeckIds().has(String(deckId ?? "")), assetFile, slideRenderInfo, deckCoverUrl, deckRevisions, deckDocs, deckDoc, deckDocsScaffold, deckDocFile, pageForEdit, pagePrompt, savePage, exportDeckFile, designSamples, sourceFile, homeCatalog, mediaFile, renderState, setRenderSelection, renderRuntime, createDeck, createDesign, createStyleFromDeck, designProjects, designStyle, updateDesignStyle, backfillStyleBriefs, listBindings, bindSession, unbindSession, deleteDesign, deleteDeck, setDeckDesign, addDesignSamples, seedStyleDesigns, renderStatus, exportHandoff, updateBrief, updateStatus, runSelfUpdate }
 }
 
+/* ─────────────────────────────────────────────────────────────────────────
+ * P0：数据目录体检 / 自检（模块级实现，路由与服务两侧共用一份口径）
+ *
+ * 传入的是「服务状对象」`{ config, store, workspace, adapters, env }`，不依赖 createService
+ * 的闭包——这样 index.js 末尾那条超长的 `return { … }` 不需要改，路由侧也能复用同一套判断。
+ * ───────────────────────────────────────────────────────────────────────── */
+
+/** 体检缓存：按 dataRoot 分桶（切换目录后自然失效），5s 轮询里只付几次 stat。 */
+const dataDirReportCache = new Map();
+/** 每本 deck 上次记录过事件的异常状态；只用于「状态变化才记」，不参与判定。 */
+const dataDirSeen = new Map();
+
+/** 待体检的 deck 清单。`local` 决定 absent 口径：本机新建 deck 静默，外部受控源给 info 弱提示。 */
+function auditableDecksOf({ config, workspace, adapters }) {
+  const localRoots = [join(config.dataRoot, "projects"), config.projectsRoot].filter(Boolean);
+  return (adapters ?? []).map((adapter) => {
+    const manifest = workspace.manifest(adapter.id);
+    const sourceRoot = adapter.sourceRoot ?? "";
+    return {
+      id: adapter.id,
+      label: adapter.label,
+      title: manifest?.title ?? adapter.label,
+      pageCount: manifest?.slides?.length ?? 0,
+      sourceRoot,
+      sourceAvailable: adapter.available(),
+      local: Boolean(sourceRoot) && localRoots.some((root) => sourceRoot === root || sourceRoot.startsWith(`${root}${sep}`)),
+    };
+  });
+}
+
+/** 体检（缓存 2s；`refresh` / `countImages` 时强制重算）。 */
+function dataDirReportOf(serviceLike, { refresh = false, countImages = false } = {}) {
+  const { config, workspace, adapters, env = process.env } = serviceLike;
+  const now = Date.now();
+  const cached = dataDirReportCache.get(config.dataRoot);
+  if (!refresh && !countImages && cached && now - cached.at < 2000) return cached.report;
+  const report = assessDataDir({
+    dataRoot: config.dataRoot,
+    decks: auditableDecksOf({ config, workspace, adapters }),
+    env,
+    cwd: process.cwd(),
+    profileDataRoots: [config.dataDir?.profileDataRoot].filter(Boolean),
+    countImages,
+  });
+  if (!countImages) dataDirReportCache.set(config.dataRoot, { at: now, report });
+  return report;
+}
+
+/**
+ * 状态变化才记事件（工作台 5s 轮询，同一状态重复记会把事件表刷满）。
+ * `absent` 一律不记——首次打开不是异常，弱提示走 UI 的 notice，不进事件流水。
+ */
+function noteDataDirTransitions(serviceLike, report, trigger = "poll") {
+  const { config, store } = serviceLike;
+  for (const deck of report?.decks ?? []) {
+    if (deck.status !== "mismatch" && deck.status !== "partial") {
+      dataDirSeen.delete(deck.deckId);
+      continue;
+    }
+    if (dataDirSeen.get(deck.deckId) === deck.status) continue;
+    dataDirSeen.set(deck.deckId, deck.status);
+    store.recordEvent({
+      type: "deck.dataDir.mismatch",
+      deckId: deck.deckId,
+      actor: "system",
+      status: "failed",
+      payload: {
+        trigger,
+        dataRoot: config.dataRoot,
+        status: deck.status,
+        imageCount: deck.imageCount,
+        candidateCount: (deck.candidates ?? []).length,
+        candidates: (deck.candidates ?? []).map((candidate) => ({
+          dataRoot: candidate.dataRoot,
+          deckCount: candidate.deckCount,
+          imageCount: candidate.imageCount,
+        })),
+      },
+    });
+  }
+}
+
+/**
+ * 数据目录载荷：黄条 / 设置页 / 自检共用（不重算解析，只合并最新体检）。
+ */
+function dataDirStateOf(serviceLike, deckId = null, { refresh = false, countImages = false } = {}) {
+  const { config } = serviceLike;
+  const resolved = config.dataDir ?? {};
+  const report = dataDirReportOf(serviceLike, { refresh, countImages });
+  noteDataDirTransitions(serviceLike, report, refresh ? "rescan" : "poll");
+  const active = deckId ? report.decks.find((deck) => deck.deckId === deckId) ?? null : null;
+  return {
+    ok: true,
+    dataRoot: resolved.dataRoot ?? null,
+    projectsRoot: resolved.projectsRoot ?? null,
+    dshHome: resolved.dshHome ?? null,
+    pointerFile: resolved.pointerFile ?? { path: "", exists: false, error: null },
+    envOverride: resolved.envOverride ?? { active: false, name: DATA_DIR_ENV },
+    firstRun: resolved.firstRun === true,
+    processCwd: resolved.processCwd ?? process.cwd(),
+    sourceLabel: resolved.sourceLabel ?? "",
+    banner: dataDirBannerFacts({ report, deckId, envOverride: resolved.envOverride?.active === true, dataRoot: config.dataRoot }),
+    decks: report.decks,
+    candidates: report.candidates,
+    checkedAt: report.checkedAt,
+    active: active
+      ? {
+          deckId: active.deckId,
+          status: active.status,
+          statusLabel: active.statusLabel,
+          needsBanner: active.needsBanner === true,
+          notice: active.notice ?? null,
+          hasScript: active.hasScript,
+          candidates: active.candidates ?? [],
+        }
+      : null,
+  };
+}
+
+/** 自检面板整表（含后端生成的脱敏文本；前端只负责复制它）。 */
+function selfCheckOf(serviceLike) {
+  const { config } = serviceLike;
+  const env = serviceLike.env ?? process.env;
+  const resolved = config.dataDir ?? resolveDataDir({
+    env,
+    profileDataRoot: config.profileDataRoot,
+    profileProjectsRoot: config.profileProjectsRoot,
+  });
+  const report = dataDirReportOf(serviceLike, { refresh: true, countImages: true });
+  const active = resolveSelection(config.render, null);
+  const workspaceFact = config.workspacePath
+    ? { value: config.workspacePath, source: "profile", envOverridden: false, writable: dirWritable(config.workspacePath), exists: existsSync(config.workspacePath) }
+    : { value: process.cwd(), source: "default", envOverridden: false, writable: dirWritable(process.cwd()), exists: true };
+  return {
+    ok: true,
+    ...buildSelfCheckPayload({
+      resolved,
+      workspacePath: workspaceFact,
+      report,
+      diskDeckIds: listDataRootDeckIds(config.dataRoot),
+      render: { mode: config.render.mode, nodeName: active?.nodeName ?? "", model: active?.model ?? config.render.model },
+      versions: { plugin: pluginVersion(), dsh: process.env.DSH_VERSION ?? "", node: process.version },
+    }),
+  };
+}
+
 /**
  * 注册路由与（可选）工具。标准 Cordis apply。
  * @param {import('@deepseek-ai/cordis').Context} ctx
  * @param {Record<string, unknown>} [rawConfig]
  */
 export function apply(ctx, rawConfig) {
-  const config = mergeConfig(rawConfig, { pluginDir: PLUGIN_DIR, env: process.env });
-  const service = createService(config, ctx.logger);
+  const env = process.env;
+  const config = mergeConfig(rawConfig, { pluginDir: PLUGIN_DIR, env });
+  // P0：dataRoot 的第二优先级是「指针文件」。mergeConfig 只算 env / profile / 默认，
+  // 这里补上 location.json（$DSH_HOME/deckline/location.json，位置固定、不可被 dataRoot 配置移动）。
+  config.dataDir = resolveDataDir({ env, profileDataRoot: config.profileDataRoot, profileProjectsRoot: config.profileProjectsRoot, logger: ctx.logger });
+  config.dataRoot = config.dataDir.dataRoot.value;
+  config.projectsRoot = config.dataDir.projectsRoot.value;
+  // profile 里声明的受控源 deck；注册表里的本机 deck 由 createService 从 <dataRoot>/decks-registry.json 补。
+  const profileDecks = config.decks.map((deck) => ({ ...deck }));
+  let service = createService(config, ctx.logger, env);
+  // P0：工具注册与 dataRoot 绑定（切目录必须重注册），disposers 在 effect 清理时统一释放。
+  let toolDisposers = [];
+  // P0：切换闸。切换期间新请求立即 409（不排队——排队会把毫秒窗口放大成超时）。
+  let switching = false;
+  /**
+   * 提供给 Agent 侧的服务门面：切 dataRoot 后仍指向当前实例。
+   * Cordis 同一路径不能重复 provide，所以只能提供一个稳定对象。
+   */
+  const deckStudioFacade = new Proxy({}, {
+    get(_target, prop) {
+      const current = service;
+      const value = current[prop];
+      return typeof value === "function" ? value.bind(current) : value;
+    },
+    has(_target, prop) {
+      return prop in service;
+    },
+  });
   // F-72：老 design 的 style.json 没存 styleBrief（模板库提示词被丢），启动时幂等补齐。
   try {
     const backfilled = service.backfillStyleBriefs();
@@ -2332,9 +2545,324 @@ export function apply(ctx, rawConfig) {
   };
   const route = (path, handler) => registerRoute(path, async (request) => json(await handler(request)));
 
-  route(ROUTES.status, () => service.status());
-  route(ROUTES.state, () => service.state());
-  route(ROUTES.workbench, (request) => service.workbench(new URL(request?.url ?? "/", "http://localhost").searchParams.get("deckId")));
+  /** 切换窗口内的统一 409：只给 code + 一句人话，前端按 code 分支（不认 message）。 */
+  const switchingResponse = () => json({ ok: false, error: { code: "switching", message: "数据目录切换中，请重试" } }, 409);
+  /** 读接口在切换窗口内立即 409（不排队）；其它时候原样透传。 */
+  const routeWhenIdle = (path, handler) => registerRoute(path, async (request) => {
+    if (switching) return switchingResponse();
+    return json(await handler(request));
+  });
+
+  /**
+   * P0：切换闸。切换窗口内**任何**新请求立即 409（不排队，排队会把毫秒窗口放大成超时）；
+   * 完成即清状态；失败由 switchDataDir 回滚到旧实例与旧指针。
+   */
+  async function switchDataDir(options = {}) {
+    if (switching) {
+      const error = new Error("数据目录切换中，请重试");
+      error.code = "switching";
+      throw error;
+    }
+    const snapshot = {
+      config: {
+        dataDir: config.dataDir,
+        dataRoot: config.dataRoot,
+        projectsRoot: config.projectsRoot,
+        decks: config.decks.map((deck) => ({ ...deck })),
+      },
+      pointer: readLocationPointer(env),
+    };
+    switching = true;
+    try {
+      // 让一次 tick：切换本身是同步的，不让出的话并发请求根本看不到窗口，闸等于没装。
+      await new Promise((resolveTurn) => setImmediate(resolveTurn));
+      return await runSwitch(options);
+    } catch (error) {
+      // 回滚：配置、注册表、指针一起退回旧状态；service 只在成功后换，所以这里仍是旧实例。
+      config.dataDir = snapshot.config.dataDir;
+      config.dataRoot = snapshot.config.dataRoot;
+      config.projectsRoot = snapshot.config.projectsRoot;
+      config.decks.length = 0;
+      for (const deck of snapshot.config.decks) config.decks.push(deck);
+      try {
+        restoreLocationPointer(snapshot.pointer, env);
+      } catch (rollbackError) {
+        ctx.logger?.warn?.(`${name}: 回滚指针文件失败：${rollbackError?.message ?? rollbackError}`);
+      }
+      if (error && typeof error === "object") {
+        if (!error.code) error.code = "switch-failed";
+        error.rolledBack = true;
+      }
+      throw error;
+    } finally {
+      switching = false;
+    }
+  }
+
+  /**
+   * 切换执行体（规格 §2「切到这个目录」）。
+   * 顺序：env 覆盖拦 → 校验目标（存在/可写/有这本 deck）→ **写指针** → 重建服务 → 记事件。
+   * 校验不通过**不写指针**，避免留下「指针指向一个不可用目录」的半截状态。
+   */
+  function runSwitch({ dataRoot, projectsRoot = "", setBy = "settings", deckId = null } = {}) {
+    const current = config.dataDir ?? {};
+    if (current.envOverride?.active) {
+      const error = new Error(`由环境变量 ${DATA_DIR_ENV} 指定（只读）`);
+      error.code = "env-override";
+      throw error;
+    }
+    const target = dirFacts(dataRoot, env);
+    if (!target.value) {
+      const error = new Error("数据目录不能为空");
+      error.code = "bad-path";
+      throw error;
+    }
+    if (!isAbsolute(target.value)) {
+      const error = new Error(`数据目录必须是绝对路径：${target.value}`);
+      error.code = "bad-path";
+      throw error;
+    }
+    if (!target.exists) {
+      const error = new Error(`目录不存在：${target.value}`);
+      error.code = "not-found";
+      throw error;
+    }
+    if (!target.writable) {
+      const error = new Error(`目录不可写：${target.value}`);
+      error.code = "not-writable";
+      throw error;
+    }
+    if (deckId) {
+      const health = deckDataHealth(target.value, deckId);
+      if (!health.deckDirExists) {
+        const error = new Error(`这个目录里没有这本 deck 的运行时数据：${join(target.value, "decks", deckId)}`);
+        error.code = "deck-not-there";
+        throw error;
+      }
+    }
+    const from = config.dataRoot;
+    const written = writeLocationPointer({ dataRoot: target.value, projectsRoot, setBy }, env);
+    const resolved = resolveDataDir({ env, profileDataRoot: config.profileDataRoot, profileProjectsRoot: config.profileProjectsRoot, logger: ctx.logger });
+    config.dataDir = resolved;
+    config.dataRoot = resolved.dataRoot.value;
+    config.projectsRoot = resolved.projectsRoot.value;
+    // 注册表跟着 dataRoot 走：先回到 profile 声明的那批，再由 createService 补新目录的 decks-registry.json。
+    config.decks.length = 0;
+    for (const deck of profileDecks) config.decks.push({ ...deck });
+    // 切目录不重新自举示例 deck（bootstrap 只对全新安装有意义，否则会往用户选的目标目录塞内容）。
+    const bootstrap = config.bootstrap;
+    config.bootstrap = false;
+    let next = null;
+    try {
+      next = createService(config, ctx.logger, env);
+    } finally {
+      config.bootstrap = bootstrap;
+    }
+    // 新实例建好后才拆旧工具、换指针：中途抛错时旧服务仍在服务，外层 catch 回滚配置与指针。
+    unregisterDeckTools();
+    service = next;
+    registerDeckTools();
+    service.store.recordEvent({
+      type: "deck.dataDir.switch",
+      deckId,
+      actor: "user",
+      status: "succeeded",
+      payload: { from, to: config.dataRoot, trigger: setBy, pointer: written.path },
+    });
+    return { ok: true, switched: { from, to: config.dataRoot }, dataDir: dataDirStateOf(service, deckId, { refresh: true }) };
+  }
+
+  /**
+   * deck 工具注册（preset 子树挂载 config.tools=true 才注册）。
+   * P0：抽成函数，切 dataRoot 后重注册——工具持有 store / workspace / adapters，不重注册会继续写旧目录。
+   */
+  function registerDeckTools() {
+    if (!config.tools) return;
+    const toolRuntime = ctx.get("tools");
+    if (!toolRuntime?.register) {
+      ctx.logger?.warn?.(`${name}: config.tools=true 但 tools 服务不可用——deck 工具未注册`);
+      return;
+    }
+    const tools = defineDeckTools({
+      store: service.store,
+      workspace: service.workspace,
+      adapters: service.adapters,
+      config,
+      env,
+      repoRoot: repoRootFrom(PLUGIN_DIR),
+      isLocalDeck: (deckId) => service.isLocalDeck(deckId),
+      resolveRender: (deckId) => service.renderRuntime(deckId),
+      createStyle: (payload) => service.createStyleFromDeck(payload),
+      subagents: () => ctx.get("subagents") ?? null,
+    });
+    for (const tool of tools) toolDisposers.push(toolRuntime.register(tool));
+    ctx.logger?.info?.(`${name}: deck tools registered (${tools.map((tool) => tool.name).join(", ")})`);
+  }
+
+  function unregisterDeckTools() {
+    for (const dispose of toolDisposers) {
+      try {
+        dispose();
+      } catch {
+        /* 已卸载 / 运行时已销毁：忽略 */
+      }
+    }
+    toolDisposers = [];
+  }
+
+  routeWhenIdle(ROUTES.status, () => service.status());
+  routeWhenIdle(ROUTES.state, () => service.state());
+  routeWhenIdle(ROUTES.workbench, (request) => service.workbench(new URL(request?.url ?? "/", "http://localhost").searchParams.get("deckId")));
+  // P0：数据目录（GET 读状态 / POST 切换）——顶栏黄条、首次引导、设置页共用。
+  // 规格 §2「切到这个目录」：校验可读 → 写指针 → 重建 manifest → 回原 deck → 记事件 deck.dataDir.switch。
+  // 切换窗口内新请求立即 409 switching（不排队）；切换失败已回滚，返回的 error.code 稳定不变。
+  registerRoute(
+    ROUTES.dataDir,
+    async (request) => {
+      if (switching) return switchingResponse();
+      const url = new URL(request?.url ?? "/", "http://localhost");
+      if ((request?.method ?? "GET").toUpperCase() === "POST") {
+        const body = await request.json().catch(() => ({}));
+        try {
+          return json(await switchDataDir({ dataRoot: body?.dataRoot, projectsRoot: body?.projectsRoot ?? "", setBy: body?.setBy ?? "settings", deckId: body?.deckId ?? null }));
+        } catch (error) {
+          const code = error?.code ?? "switch-failed";
+          const conflict = code === "env-override" || code === "deck-not-there" || code === "switching";
+          const badInput = code === "bad-path" || code === "not-found" || code === "not-writable";
+          return json({ ok: false, error: { code, message: String(error?.message ?? error), rolledBack: error?.rolledBack === true } }, conflict ? 409 : badInput ? 400 : 500);
+        }
+      }
+      try {
+        return json(dataDirStateOf(service, url.searchParams.get("deckId") || null, { refresh: url.searchParams.get("refresh") === "1" }));
+      } catch (error) {
+        return json({ ok: false, error: { code: "check-failed", message: String(error?.message ?? error) } }, 500);
+      }
+    },
+    ["GET", "POST"],
+  );
+
+  /** 目录浏览：一次最多列 500 个子目录（超出置 truncated），deckCount 最多数 200 个 deck 就停。 */
+  const BROWSE_MAX_ENTRIES = 500;
+  const BROWSE_DECK_COUNT_CAP = 200;
+
+  /**
+   * 一个子目录里有几本 deck 有正文（`decks/<id>/script/current.md`）。
+   * 只做存在性判断：不递归、不读文件内容、单个 deck 判断失败就跳过。
+   */
+  function countDecksIn(childPath) {
+    const decksDir = join(childPath, "decks");
+    let entries;
+    try {
+      entries = readdirSync(decksDir, { withFileTypes: true });
+    } catch {
+      return 0;
+    }
+    let count = 0;
+    for (const entry of entries) {
+      if (count >= BROWSE_DECK_COUNT_CAP) break;
+      if (!entry.isDirectory()) continue;
+      if (existsSync(join(decksDir, entry.name, "script", "current.md"))) count += 1;
+    }
+    return count;
+  }
+
+  /**
+   * 列一个目录的**子目录**（目录选择器数据源）。
+   * 只返回目录名与「这里有 N 本 deck」的粗判断：不读文件内容、不返回大小 / 权限 / 环境变量。
+   * @param {string} pathValue 绝对路径；空 = 当前生效的 dataRoot
+   * @returns {{path: string, parent: string, isRoot: boolean, truncated: boolean, dirs: {name: string, path: string, hidden: boolean, hasScript: boolean, deckCount: number, isDataRoot: boolean}[]}}
+   */
+  function browseDir(pathValue) {
+    const raw = String(pathValue ?? "").trim();
+    if (raw && !isAbsolute(raw)) {
+      const error = new Error(`必须是绝对路径：${raw}`);
+      error.code = "bad-path";
+      throw error;
+    }
+    const currentDataRoot = String(config.dataRoot ?? "");
+    const target = resolve(raw || currentDataRoot || process.cwd());
+    let stats;
+    try {
+      stats = statSync(target);
+    } catch {
+      const error = new Error(`目录不存在：${target}`);
+      error.code = "not-found";
+      throw error;
+    }
+    if (!stats.isDirectory()) {
+      const error = new Error(`不是目录：${target}`);
+      error.code = "not-a-dir";
+      throw error;
+    }
+    let entries;
+    try {
+      entries = readdirSync(target, { withFileTypes: true });
+    } catch (error) {
+      const failed = new Error(`读不到目录：${target}（${error?.message ?? error}）`);
+      failed.code = "browse-failed";
+      throw failed;
+    }
+    const dirs = [];
+    let truncated = false;
+    for (const entry of entries) {
+      if (dirs.length >= BROWSE_MAX_ENTRIES) {
+        truncated = true;
+        break;
+      }
+      const childPath = join(target, entry.name);
+      // 目录判断：普通目录直接用 Dirent；符号链接 / 未知类型才 stat，单个失败就跳过（权限问题不该让整页崩）。
+      let childIsDir = entry.isDirectory();
+      if (!childIsDir && (entry.isSymbolicLink() || (!entry.isFile() && !entry.isDirectory()))) {
+        try {
+          childIsDir = statSync(childPath).isDirectory();
+        } catch {
+          childIsDir = false;
+        }
+      }
+      if (!childIsDir) continue;
+      dirs.push({
+        name: entry.name,
+        path: childPath,
+        hidden: entry.name.startsWith("."),
+        hasScript: existsSync(join(childPath, "script", "current.md")),
+        deckCount: countDecksIn(childPath),
+        isDataRoot: Boolean(currentDataRoot) && resolve(currentDataRoot) === childPath,
+      });
+    }
+    dirs.sort((a, b) => a.name.localeCompare(b.name));
+    const parentPath = dirname(target);
+    return {
+      path: target,
+      parent: parentPath,
+      isRoot: parentPath === target,
+      truncated,
+      dirs,
+    };
+  }
+
+  // 目录浏览（目录选择器）：GET ?path=<绝对路径>；缺省 = 当前 dataRoot。
+  // 只列子目录名 + deckCount，不读内容、不返回大小 / 权限 / 环境变量；切换窗口内复用切换闸 409。
+  registerRoute(ROUTES.dirBrowse, (request) => {
+    if (switching) return switchingResponse();
+    const url = new URL(request?.url ?? "/", "http://localhost");
+    try {
+      return json({ ok: true, dir: browseDir(url.searchParams.get("path") ?? "") });
+    } catch (error) {
+      const code = error?.code ?? "browse-failed";
+      const status = code === "switching" ? 409 : code === "browse-failed" ? 500 : 400;
+      return json({ ok: false, error: { code, message: String(error?.message ?? error) } }, status);
+    }
+  }, ["GET"]);
+
+  // P0：设置页第一屏的自检整表（含后端生成的脱敏文本，前端只负责复制）。
+  registerRoute(ROUTES.selfCheck, () => {
+    if (switching) return switchingResponse();
+    try {
+      return json(selfCheckOf(service));
+    } catch (error) {
+      return json({ ok: false, error: { code: "self-check-failed", message: String(error?.message ?? error) } }, 500);
+    }
+  }, ["GET"]);
   registerRoute(
     ROUTES.app,
     () => new Response(workbenchPage(), { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } }),
@@ -2662,25 +3190,15 @@ export function apply(ctx, rawConfig) {
 
   ctx.effect(
     () => async () => {
+      unregisterDeckTools();
       await Promise.allSettled(disposers.map((dispose) => dispose()));
     },
     `${name}: fetch routes`,
   );
 
   // preset 子树挂载（config.tools = true）才注册工具；"tools" 服务不存在时显式报错，
-  // 不静默吞——「工具没挂上」必须可见。
-  if (config.tools) {
-    const toolRuntime = ctx.get("tools");
-    if (!toolRuntime?.register) {
-      ctx.logger?.warn?.(`${name}: config.tools=true 但 tools 服务不可用——deck 工具未注册`);
-    } else {
-      const tools = defineDeckTools({ store: service.store, workspace: service.workspace, adapters: service.adapters, config, env: process.env, repoRoot: repoRootFrom(PLUGIN_DIR), isLocalDeck: (deckId) => service.isLocalDeck(deckId), resolveRender: (deckId) => service.renderRuntime(deckId), createStyle: (payload) => service.createStyleFromDeck(payload), subagents: () => ctx.get("subagents") ?? null });
-      for (const tool of tools) {
-        disposers.push(toolRuntime.register(tool));
-      }
-      ctx.logger?.info?.(`${name}: deck tools registered (${tools.map((tool) => tool.name).join(", ")})`);
-    }
-  }
+  // 不静默吞——「工具没挂上」必须可见。P0：抽成函数，切 dataRoot 后要重注册（工具持有 store / adapters）。
+  registerDeckTools();
 
   // 服务树里的 deckStudio 是单例：**只由根挂载（routes 开启）提供**。
   // preset 子树里的工具挂载不能再 provide——Cordis 同一 realm 内重复 provide 会抛
@@ -2688,7 +3206,7 @@ export function apply(ctx, rawConfig) {
   // 新会话报 agent-preset/invalid（2026-10-20 真机踩到并复现）。
   if (config.routes) {
     try {
-      ctx.provide("deckStudio", service);
+      ctx.provide("deckStudio", deckStudioFacade);
     } catch (error) {
       ctx.logger?.debug?.(`${name}: deckStudio 已有提供方，跳过重复 provide（${error?.message ?? error}）`);
     }

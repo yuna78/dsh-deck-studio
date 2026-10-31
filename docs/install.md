@@ -45,12 +45,16 @@ node -v && pnpm -v && dsh --version
 dsh --profile deckline --from-default-profile web
 
 # 2) 装插件；dsh plugin add 会自动把组合包加入 profile 并默认启用
-dsh plugin --profile deckline add dsh-plugin-deck-studio@0.2.4
+dsh plugin --profile deckline add dsh-plugin-deck-studio@0.2.13
 ```
+
+> 第 1 步不能省：`deckline` profile **不会**被自动创建。跳过第 1 步直接 `dsh --profile deckline --port 13090`，
+> 报的是 `profile "deckline" does not exist` —— 这不是插件问题，是 profile 不存在。
+> 装过之后再升级只走第 2 步，不用再建一次 profile。
 
 > 国内网络直连 `registry.npmjs.org` 可能很慢（20 MB 包实测约 19 KB/s，要十几分钟）。换镜像会快很多：
 > ```sh
-> npm_config_registry=https://registry.npmmirror.com dsh plugin --profile deckline add dsh-plugin-deck-studio@0.2.4
+> npm_config_registry=https://registry.npmmirror.com dsh plugin --profile deckline add dsh-plugin-deck-studio@0.2.13
 > ```
 > 或一次性 `npm config set registry https://registry.npmmirror.com`。
 
@@ -71,7 +75,7 @@ DSH 目前没有官方插件市场，市场是「索引源」模式：添加下�
    https://raw.githubusercontent.com/yuna78/dsh-deck-studio/main/market-index.json
    ```
 
-3. 搜索 `Deckline` 或 `PPT` → **安装**，会安装 `dsh-plugin-deck-studio@0.2.4`（索引里声明了国内镜像 registry）。
+3. 搜索 `Deckline` 或 `PPT` → **安装**，会安装 `dsh-plugin-deck-studio@0.2.13`（索引里声明了国内镜像 registry）。
 4. 之后同 A 的第 3 步启动。
 
 索引文件就是仓库根目录的 [`market-index.json`](../market-index.json)（格式 1），新版本发布后更新版本号即可。
@@ -175,19 +179,61 @@ Deckline 的数据分两处：**你的 deck 源**（`projectsRoot`，纯 md + �
   ```sh
   tar czf deckline-backup-$(date +%Y%m%d).tgz "$DSH_HOME/deckline" "<你的 projectsRoot>"
   ```
-- 工作台「设置」面板会显示当前数据目录；开发环境也建议使用独立的 `dataRoot`，不要把运行数据写进仓库。
+- **「当前数据目录」在哪看**：指错目录时先看顶栏有没有黄条——有就点黄条里的「切到这个目录」，一步到位；没有黄条
+  （这本 deck 从没初始化过）才走 **⚙ → 右栏设置 →「其它」→「当前数据目录」→「打开自检面板」→「改数据目录」** 手填。
+  两处都写着 `dataRoot` 和它是被谁定的（`环境变量` / `指针文件` / `profile 配置` / `默认值`）；env 覆盖时追加
+  「由环境变量 DSH_DECK_DATA_ROOT 指定（只读）」，界面改不了，只能改环境变量后重启 DSH。
+- **同一台机器上的两个实例，看的是各自的 `dataRoot`**：3080（默认 `web` profile）和 13090（`deckline` profile）
+  不共享进程，也**不天然共享数据**——各自解析自己的数据目录，默认都是 `~/.dsh/deckline`；任意一边配了
+  `dataRoot` / `DSH_DECK_DATA_ROOT`，两边就各看各的。所以「换到另一个端口，内容变空 / 标题在但页面空白」先别怀疑端口：
+  去那个实例的 ⚙ 看「当前数据目录」，再和这边显示的路径比一比。
+  **换端口不改数据，换 dataRoot 才改数据。**
+- 报问题不用自己拼路径：⚙ →「当前数据目录与自检」底部 **「复制诊断信息」** 一键复制（内容由插件生成、已脱敏，
+  不含 key），贴出来就包含 cwd / dataRoot（含来源）/ projectsRoot / 每本 deck 有没有 `script/current.md`。
+- 开发环境用独立 `dataRoot`，不要把运行数据写进仓库（见 §7「开发数据目录」）。
 - **preset 工具实例要和根挂载用同一个数据根**（F-98）：DSH 面板路由与 Agent 工具是两个实例，根挂载里覆盖了
   `dataRoot` / `projectsRoot` 时，preset 的 `deck-studio-tools` 也要写同一组值（推荐 YAML 锚点），
   否则新建 deck 只进一边的注册表，Agent 会报「未知 deck：…」。
 
-## 3. 启动
+## 3. 启动：先有 profile，再谈端口
+
+`--profile deckline` 只**选** profile，不会创建它。profile 没建就启动，会停在这一行：
+
+```text
+profile "deckline" does not exist
+```
+
+从零跑到 13090，三条命令按顺序执行（第 1、2 步的具体选项见 §1；少任何一条都会停在上面的报错或白屏）：
 
 ```sh
+# 1) 建 deckline profile（基于 DSH 自带的 web 模板）
+dsh --profile deckline --from-default-profile web
+
+# 2) 装插件（自动加进该 profile 并启用）
+dsh plugin --profile deckline add dsh-plugin-deck-studio@0.2.13
+
+# 3) 启动
 dsh --profile deckline --port 13090
 ```
 
 浏览器打开终端打印的 `http://127.0.0.1:13090/?token=…`。
-`--port` 可换；不换默认 13090，避免和 DSH web profile 的 3080 冲突。
+
+带 `web` 子命令的写法也常见：`dsh --profile deckline web --port 13090`。它和上面第 3 条只差一个子命令；
+`profile "deckline" does not exist` 与写法无关，只说明 profile 没建。
+
+### 3080 和 13090 是什么关系
+
+| | 3080（默认 `web` profile） | 13090（`deckline` profile） |
+|---|---|---|
+| 怎么起 | `dsh web`（不带 `--profile`） | `dsh --profile deckline --port 13090` |
+| 装了什么 | 你日常的插件；**它若也装了 Deckline，就是另一个独立实例** | 单独一份 Deckline 挂载（同一个 npm 包） |
+| 看哪份数据 | 这个 profile 自己的 `dataRoot` | 这个 profile 自己的 `dataRoot` |
+
+- **端口只决定浏览器地址，不决定数据。** 两边各自解析 `dataRoot`：默认都是 `~/.dsh/deckline`，
+  所以都保持默认时看到的是同一份数据；哪一边配了 `dataRoot` / `DSH_DECK_DATA_ROOT`，那边就换成另一个目录。
+- 想只给 Deckline 一个入口，就用 13090；想让两边看到同一份数据，就**别只给一边配 `dataRoot`**（都不配，或配成同一路径）。
+- 反过来：**换端口不会让内容变空**。两个实例看到不同内容，几乎都是 `dataRoot` 指向了不同目录
+  （界面表现：标题在、页面空白、Inspector 报「读取正文失败」）——按 §2.5 在两边 ⚙ 里比对「当前数据目录」。
 
 ## 4. 配置生图 key（正式出图必看）
 
@@ -303,10 +349,19 @@ Designs 页 **＋ 导入预设风格** 会一次导入 9 个自带风格（商�
 |---|---|
 | 端口被占 | `dsh --profile deckline --port 13100`；或 `lsof -tiTCP:13090 -sTCP:LISTEN` 杀掉旧进程 |
 | 页面 404 / 白屏 | 确认插件组合包已启用：`dsh --profile deckline --dump-config \| grep deck-studio` |
+| 启动报 `profile "deckline" does not exist` | profile 没建，不是插件问题：先 `dsh --profile deckline --from-default-profile web`，再 `dsh plugin --profile deckline add …`，然后启动（§3） |
+| 3080 和 13090 内容不一样（标题在、页面空白） | 不是端口问题：两个实例的 `dataRoot` 不同。按 §2.5 在两边 ⚙ 里比对「当前数据目录」；让两边指向同一路径，或只用其中一个 |
+| 顶栏黄条：正文 / 图片不在当前数据目录（有 deck 但没 script，或图片在正文丢了） | 点黄条里的「切到这个目录」，不重启即恢复；候选为空时在黄条里填绝对路径 →「用这个目录」 |
+| 没有黄条，但这本 deck 里没有正文 | 正常：只有**本机新建 deck**（源就在 `projectsRoot`，还没出过图）首次打开时静默。其它情况——尤其外部源 deck——当前数据目录里找不到正文**一定**出黄条，零候选时黄条里给手填绝对路径输入框 |
+| 设置里显示「由环境变量 DSH_DECK_DATA_ROOT 指定（只读）」 | 界面不能改：改这个环境变量后重启 DSH（与 `--port` 无关） |
+| Inspector 报「读取正文失败：当前数据目录没有这本 deck 的 script」 | 当前数据目录里没有这本 deck 的工作副本。按文案里的 `dataRoot` 核对（§2.5） |
 | 没有「生图」按钮 / 出图失败 | 设置面板看 key 是否配置；确认 `render.mode: real`；节点 endpoint 可 `curl` 通 |
 | 新 deck 目录落错位置 | 配 `projectsRoot`；否则落在 `<dataRoot>/projects/`（默认 `<DSH_HOME>/deckline/projects/`） |
 | 数据 / 样张在哪 | 见 §2.5：源 deck 在 `projectsRoot`，工作副本 / 出图在 `dataRoot`（默认 `~/.dsh/deckline`） |
 | 升级插件 | `dsh plugin --profile deckline install <spec>`，或重新 `add` 新版本 |
+
+> 早期按 `deck-studio` 建过 profile 的机器：把上面命令里的 `deckline` 换成那个名字即可——两者只是 profile 名不同，
+> 命令里的名字要和 `~/.dsh/profiles/` 下的目录名一致。
 
 ## 7. 开发者：本地验证
 
@@ -318,6 +373,11 @@ dsh --profile deck-studio --no-open             # 本仓开发 profile（端口�
 
 插件无第三方运行时依赖（只用 Node 内置模块）；改 `plugin/deck-studio/index.js` 需要重启 profile，
 只改 `ui/` 里的 html/css 会热更新。
+
+> **开发数据目录（仅调试用，不是推荐值）**：本仓开发 profile（`deck-studio`），或手动把 `dataRoot` 指到仓库时，
+> 运行数据会落在仓库根的 `.deck/`（已在 `.gitignore`，不会进 git），界面上标成**「开发数据目录」**。
+> 这么做只为「两个 profile 同仓同数据、trace 连续」（ADR-0006 D6），**不要当成默认值写给用户**：
+> 正常安装用默认的 `~/.dsh/deckline`，或自己指定一个仓库外的目录。
 
 ## 2.5 首次启动会自动准备好什么（bootstrap）
 

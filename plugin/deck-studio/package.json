@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-deck-studio",
-  "version": "0.2.11",
+  "version": "0.2.13",
   "description": "Deckline：DSH 的 image deck / PPT 工作台插件——原生 Chat + 整页图片 deck 工作区 + 设计风格库；用对话做 PPT、按页出图、版本可追踪、导出 PDF/PPTX。",
   "icon": "assets/icon.svg",
   "homepage": "https://github.com/yuna78/dsh-deck-studio#readme",
