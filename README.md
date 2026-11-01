@@ -2,6 +2,8 @@
 
 # Deckline · DSH image deck 工作台
 
+[![integrity](https://github.com/yuna78/dsh-deck-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/yuna78/dsh-deck-studio/actions/workflows/ci.yml)
+
 简体中文 · [English](README.en.md)
 
 **Deckline** 是 DeepSeek Harness（DSH）的 image deck（整页图片幻灯片）工作台插件：

@@ -2,6 +2,8 @@
 
 # Deckline · image deck studio for DSH
 
+[![integrity](https://github.com/yuna78/dsh-deck-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/yuna78/dsh-deck-studio/actions/workflows/ci.yml)
+
 [简体中文](README.md) · English
 
 > **Every button explained:** see the [English manual (docs/manual.en.md)](docs/manual.en.md) or the

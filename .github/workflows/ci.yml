@@ -1,0 +1,104 @@
+name: integrity
+
+# 公开仓（yuna78/dsh-deck-studio）只做「产物完整性」：
+#   1) 必备文件齐；2) 版本三处一致（market-index / plugin package.json / CHANGELOG）；
+#   3) 内部台账 / 客户资料 / 密钥没有漏进来（白名单 + 隐私扫描）；
+# 单元测试与契约冒烟在私有开发仓的 CI 里跑（那边有完整源码与 fixtures），这里不重复。
+# 本文件由私有仓 scripts/build-public-bundle.mjs 从 .github/public-ci.yml 复制过来，改模板别改这里。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integrity-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integrity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 完整性 / 版本一致 / 白名单 / 隐私扫描
+        run: |
+          node <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const read = (p) => fs.readFileSync(p, "utf8");
+          const failures = [];
+          const pass = (m) => console.log(`✔ ${m}`);
+          const check = (cond, okMsg, badMsg) => (cond ? pass(okMsg) : failures.push(badMsg));
+
+          // 1) 必备文件
+          const REQUIRED = [
+            "README.md", "README.en.md", "LICENSE", "CHANGELOG.md", "market-index.json",
+            "plugin/deck-studio/package.json", "plugin/deck-studio/index.js", "plugin/deck-studio/client.js",
+            "plugin/deck-studio/cordis.patch.yml",
+            "docs/install.md", "docs/install.en.md", "docs/manual.md", "docs/manual.en.md",
+            "docs/styles.md", "docs/sample-deck.md", "docs/compat.md",
+          ];
+          const missing = REQUIRED.filter((f) => !fs.existsSync(f));
+          check(missing.length === 0, `必备文件齐（${REQUIRED.length} 个）`, `缺必备文件：${missing.join(", ")}`);
+
+          // 2) 版本三处一致：插件 package.json / market-index 最新条目 / CHANGELOG 顶部
+          let pkg, market, changelogVersion;
+          try { pkg = JSON.parse(read("plugin/deck-studio/package.json")); } catch (error) { failures.push(`plugin package.json 解析失败：${error.message}`); }
+          try { market = JSON.parse(read("market-index.json")); } catch (error) { failures.push(`market-index.json 解析失败：${error.message}`); }
+          const top = /^##\s+\[([0-9][^\]\s]*)\]/m.exec(read("CHANGELOG.md"));
+          changelogVersion = top ? top[1] : "";
+          const marketVersion = market?.plugins?.[0]?.versions?.[0]?.version ?? "";
+          if (pkg) {
+            check(/^\d+\.\d+\.\d+/.test(pkg.version || ""), `插件版本合法：${pkg.version}`, `插件版本不合法：${pkg.version}`);
+            check(marketVersion === pkg.version, `market-index 版本与插件一致：${marketVersion}`, `market-index 版本 ${marketVersion} ≠ 插件 ${pkg.version}`);
+            check(changelogVersion === pkg.version, `CHANGELOG 顶部版本与插件一致：${changelogVersion}`, `CHANGELOG 顶部 ${changelogVersion} ≠ 插件 ${pkg.version}`);
+            check(!!pkg.engines?.dsh, `声明了 engines.dsh：${pkg.engines?.dsh}`, "package.json 缺 engines.dsh");
+            check(Array.isArray(market?.plugins?.[0]?.versions?.[0]?.engines?.dsh ? [1] : []), "market-index 条目带 engines.dsh", "market-index 条目缺 engines.dsh");
+          }
+
+          // 3) 内部台账 / 真实数据不许出现在公开仓
+          const INTERNAL = ["CURRENT.md", "HANDOVER.md", "tasks.md", "AGENTS.md", "AGENTS.local.md",
+            "docs/feedback.md", "docs/adr", "docs/log", "docs/feedback-history", "docs/harness.md",
+            ".deck", "scripts", "verify", "fixtures", "dev-assistant-bundle"];
+          const leaked = INTERNAL.filter((p) => fs.existsSync(p));
+          check(leaked.length === 0, `没有内部文件（${INTERNAL.length} 项白名单外检查）`, `公开仓出现内部文件：${leaked.join(", ")}`);
+
+          // 4) 兜底扫描：客户名 / 公司名的敏感词表留在私有仓构建时扫（公开仓不放词表本身）；
+          //    这里只扫「一旦漏出就是事故」的通用模式：个人绝对路径、relay key、API key。
+          const FORBIDDEN = [
+            [/\/Users\/[A-Za-z0-9._-]+/, "个人绝对路径"],
+            [/[A-Z]:\\Users\\[A-Za-z0-9._-]+/, "个人绝对路径（Windows）"],
+            [/RELAY_[A-Z0-9_]*KEY\s*=\s*\S+/, "relay key"],
+            [/sk-[A-Za-z0-9_-]{20,}/, "疑似 API key"],
+          ];
+          const TEXT = new Set([".md", ".js", ".mjs", ".json", ".yml", ".yaml", ".html", ".css", ".svg", ".txt"]);
+          const hits = [];
+          const walk = (dir) => {
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+              if (entry.name === ".git" || entry.name === "node_modules") continue;
+              const full = path.join(dir, entry.name);
+              if (entry.isDirectory()) { walk(full); continue; }
+              if (!TEXT.has(path.extname(entry.name).toLowerCase())) continue;
+              const text = read(full);
+              for (const [pattern, label] of FORBIDDEN) if (pattern.test(text)) hits.push(`${full} → ${label}`);
+            }
+          };
+          walk(".");
+          check(hits.length === 0, `隐私扫描 0 命中（${FORBIDDEN.length} 类规则）`, `隐私命中：\n  ${hits.join("\n  ")}`);
+
+          console.log("");
+          if (failures.length) {
+            for (const line of failures) console.error(`✖ ${line}`);
+            process.exit(1);
+          }
+          console.log(`✔ 公开仓产物完整性通过（${REQUIRED.length} 个必备文件，版本 ${pkg?.version}）`);
+          NODE
