@@ -29,6 +29,14 @@ window.__ModuleLoader__.load({
     const WORKBENCH_KEY = "deck-studio-workbench";
     const ROUTE_PREFIX = "/api/deck-studio.";
     const POLL_MS = 5000;
+    /**
+     * F-202B（ADR-0027）：桌面宿主的 shell 起源是自定义协议（如 dsh-app://），嵌 DSH 页面的
+     * 子帧拿不到 boot 注入、流式端点也不可达 —— 桌面里对话改用「原生会话 Dock」；
+     * web（http）宿主继续走工作台内嵌的 DSH iframe。
+     */
+    const DESKTOP_SHELL = !/^(https?:)$/.test(location.protocol);
+    /** 桌面 Dock 渲染会话用的子弹槽名（shell.overlay 条目下的 session 作用域子槽）。 */
+    const CHAT_SLOT = `${WORKBENCH_KEY}.chat`;
 
     /** 路由白名单：getJson 只放行这一族地址。 */
     async function getJson(path) {
@@ -274,9 +282,21 @@ div[data-sidebar-collapsed]{grid-template-columns:0px minmax(0px,1fr) 0px!import
      * 打开先到主页（#/home/decks），点 deck 后是左中右三栏：左原生 Chat / 中间整页图片 / 右资料库。
      * 对话仍走 DSH 原生 Chat（工作台左栏嵌 `/?decklineChat=1`），权限、附件、模型、思考过程、气泡都是原生的。
      */
+
+    /**
+     * 桌面 Dock（F-202B / ADR-0027 升级）：桌面里不再嵌 DSH 页面，用宿主 `shell.overlay` +
+     * SessionProvider + `sessions.retain` 把**原生会话**渲染到工作台对话列的位置
+     * （multichat / html-deck-studio 同款做法，注册形状已在该宿主验证）。
+     * 工作台（iframe）把当前绑定会话经 `dsh-deck-studio:chat-session` 报上来；
+     * Dock 测量工作台 iframe 里 `#chatDockArea` 的矩形后固定覆盖其上。
+     */
+    /** 客户端插件体：样式 + 槽位注册。 */
+    function apply(ctx) {
+      injectStylesheet();
     function WorkbenchFrame() {
       return h("iframe", {
         id: "dsh-deck-workbench-frame",
+        ref: (node) => setWorkbenchFrame(node),
         title: "Deckline 工作台",
         src: "/api/deck-studio.app#/home/decks",
         style: { width: "100%", height: "100%", border: 0, display: "block", background: "#faf8f2" },
@@ -286,9 +306,94 @@ div[data-sidebar-collapsed]{grid-template-columns:0px minmax(0px,1fr) 0px!import
       });
     }
 
-    /** 客户端插件体：样式 + 槽位注册。 */
-    function apply(ctx) {
-      injectStylesheet();
+      const dockState = { sessionId: "", listeners: new Set() };
+      function publishDockSession(sessionId) {
+        const next = typeof sessionId === "string" ? sessionId : "";
+        if (dockState.sessionId === next) return;
+        dockState.sessionId = next;
+        for (const listener of dockState.listeners) listener();
+      }
+      function subscribeDockSession(listener) {
+        dockState.listeners.add(listener);
+        return () => dockState.listeners.delete(listener);
+      }
+
+      /** 工作台 iframe 元素引用（React ref）；Dock 靠它测矩形 / 报「Dock 已就绪」。 */
+      const frameState = { el: null, listeners: new Set() };
+      function setWorkbenchFrame(node) {
+        const next = node ?? null;
+        if (frameState.el === next) return;
+        frameState.el = next;
+        for (const listener of frameState.listeners) listener();
+      }
+      function subscribeWorkbenchFrame(listener) {
+        frameState.listeners.add(listener);
+        return () => frameState.listeners.delete(listener);
+      }
+
+      /** 会话内容视图：复用宿主 `conversation.session` 槽（不是复制品）。 */
+      function DeckChatView(props) {
+        return props.renderSlot("conversation.session", { view: "chat" });
+      }
+      function DeckChatBody({ useSession, useConversation, renderFactorySlot }) {
+        const session = useSession((value) => value);
+        const active = useConversation((value) => value).activeTargets;
+        const phase = (!session.blank || session.running || active.size > 0) ? "active" : "hero";
+        return renderFactorySlot("conversation.content", { variant: "embedded", phase, hero: phase === "hero" }, { slots: { views: DeckChatView } });
+      }
+      /** Dock：测量工作台对话占位矩形；用 retain 的会话引用喂 SessionProvider。 */
+      function DeckChatDock({ SessionProvider, renderSlot }) {
+        const sessionId = React.useSyncExternalStore(subscribeDockSession, () => dockState.sessionId);
+        // 主区面板卸载/重建时 iframe 元素会换，Dock 必须跟着重算位置，否则切走再切回来就不见了。
+        const frameEl = React.useSyncExternalStore(subscribeWorkbenchFrame, () => frameState.el);
+        const [rect, setRect] = React.useState(null);
+        const [reference, setReference] = React.useState(null);
+        React.useEffect(() => {
+          const measure = () => {
+            let next = null;
+            try {
+              const outer = frameEl?.getBoundingClientRect?.();
+              // 只盖住对话框的内容区（#chatDockArea），把上面的绑定/＋/会话菜单那一行留出来。
+              const inner = frameEl?.contentDocument?.querySelector("#chatDockArea")?.getBoundingClientRect?.();
+              if (outer && inner && outer.width > 0 && inner.width > 4 && inner.height > 4) {
+                next = {
+                  left: Math.round(outer.left + inner.left),
+                  top: Math.round(outer.top + inner.top),
+                  width: Math.round(inner.width),
+                  height: Math.round(inner.height),
+                };
+              }
+            } catch {
+              next = null;
+            }
+            setRect((prev) => (prev && next && prev.left === next.left && prev.top === next.top && prev.width === next.width && prev.height === next.height) ? prev : next);
+          };
+          measure();
+          if (!frameEl) { setRect(null); return undefined; }
+          const timer = setInterval(measure, 800);
+          window.addEventListener("resize", measure);
+          return () => { clearInterval(timer); window.removeEventListener("resize", measure); };
+        }, [frameEl]);
+        // 引用放 state（不是 ref）：StrictMode 的 effect 重放与 ref 释放会让提交渲染时 ref 为空。
+        React.useEffect(() => {
+          const sessions = ctx.sessions;
+          if (!sessionId || typeof sessions?.retain !== "function") { setReference(null); return undefined; }
+          let held = null;
+          try { held = sessions.retain(sessionId, { source: WORKBENCH_KEY }); } catch (error) { ctx.logger?.warn?.(`deck-studio: retain failed: ${error?.message ?? error}`); }
+          setReference(held ?? null);
+          return () => { try { held?.release?.(); } catch { /* 已释放 */ } };
+        }, [sessionId]);
+        // Dock 已在渲染：告诉工作台 iframe 收起降级卡（#chatHostCard）。
+        React.useEffect(() => {
+          if (!rect || !reference || !frameEl?.contentWindow) return;
+          try { frameEl.contentWindow.postMessage({ type: "dsh-deck-studio:chat-dock" }, "*"); } catch { /* 不可达时降级卡留着 */ }
+        }, [rect, reference]);
+        if (!SessionProvider || !renderSlot || !reference || !rect) return null;
+        return h("div", {
+          "data-deck-studio-chat-dock": "",
+          style: { position: "fixed", left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px`, zIndex: 40, display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden", background: "var(--paper,#faf8f2)", borderRight: "1px solid var(--line,#e8e2d6)", pointerEvents: "auto" },
+        }, h(SessionProvider, { session: reference }, renderSlot(CHAT_SLOT, {})));
+      }
       // 工作台左栏会把 DSH 原生 Chat 以 `/?decklineChat=1` 嵌进来（同源 iframe）。
       // 那个嵌套的 DSH 实例不再自动打开工作台，否则会层层嵌套（F-68）。
       const chatEmbed = new URLSearchParams(window.location.search).get("decklineChat") === "1";
@@ -431,7 +536,11 @@ div[data-sidebar-collapsed]{grid-template-columns:0px minmax(0px,1fr) 0px!import
           // 不把插件安装目录或 DSH 私有数据目录登记成用户工作区。
           const path = normalize(cwd);
           const internal = /(^|\/)node_modules(\/|$)|(^|\/)\.dsh(\/|$)/.test(path);
-          if (path && path !== "/" && !internal) return register(cwd);
+          // F-202B：桌面宿主里 shell 的 process.cwd 是 App 包目录（/Applications/DeepSeek Harness.app）
+          // ——把它登记成用户工作区是错的（web 宿主的 cwd 才是启动目录）。这类系统路径视为不可信，
+          // 落到 sourceRoot / 默认工作区兜底，而不是新建一个垃圾工作区。
+          const systemPath = path === "/" || path.startsWith("/Applications/") || /^(\/System(\/|$)|\/Library(\/|$)|\/private\/var|\/usr\/|\/opt\/|\/Volumes\/)/.test(path);
+          if (path && !internal && !systemPath) return register(cwd);
         }
         const sourceRoot = String(data.sourceRoot ?? "").trim();
         const sourceWorkspace = sourceRoot ? containing(sourceRoot) : null;
@@ -486,7 +595,25 @@ div[data-sidebar-collapsed]{grid-template-columns:0px minmax(0px,1fr) 0px!import
             let sessionId = String(data.sessionId ?? "").trim();
             if (data.action === "ensure") sessionId = await ensureConversationSession(data);
             if (!sessionId) throw new Error("没有目标会话");
-            if (data.action === "open" || data.action === "ensure") uiWorkspace.openSession(sessionId);
+            /**
+             * F-202B（ADR-0027）：`open !== false` = 把会话切到宿主主区（web 内嵌 iframe 的原语义，
+             * 桌面「在主区打开」的显式入口）；`open:false` = 桌面 Dock 模式——会话已在工作台
+             * 左栏原生渲染，只把会话准备好并回 id，不抢宿主主区。会话目录未就绪时短重试
+             * （`sessions.retain: unknown session...` 是自愈错误，不是会话丢失）。
+             */
+            if ((data.action === "open" || data.action === "ensure") && data.open !== false) {
+              const delays = [0, 300, 700, 1500, 2500];
+              let lastError = null;
+              for (const delay of delays) {
+                if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+                try { await uiWorkspace.openSession(sessionId); lastError = null; break; } catch (error) {
+                  lastError = error;
+                  if (!/sessions\.retain|unknown session/i.test(String(error?.message ?? error))) throw error;
+                }
+              }
+              if (lastError) throw lastError;
+              if (data.takeMain === true && DESKTOP_SHELL) closeWorkbench();
+            }
             if (data.prompt && data.action === "ensure" && sessionId !== String(data.sessionId ?? "")) {
               await sendToSession(sessionId, String(data.prompt));
             }
@@ -499,6 +626,39 @@ div[data-sidebar-collapsed]{grid-template-columns:0px minmax(0px,1fr) 0px!import
         window.addEventListener("message", onMessage);
         return () => window.removeEventListener("message", onMessage);
       }, "deck-studio: conversation bridge");
+
+      /* 桌面 Dock 的会话源：工作台（iframe）周期性把当前绑定会话报上来。 */
+      ctx.effect(() => {
+        const onMessage = (event) => {
+          const data = event?.data ?? {};
+          if (data?.type !== "dsh-deck-studio:chat-session" || typeof data.sessionId !== "string") return;
+          if (event.source !== (frameState.el?.contentWindow ?? null)) return;
+          publishDockSession(data.sessionId);
+        };
+        window.addEventListener("message", onMessage);
+        return () => window.removeEventListener("message", onMessage);
+      }, "deck-studio: chat-session bridge");
+
+      /**
+       * F-202B：桌面「原生会话 Dock」——shell.overlay 容器 + session 作用域内容槽
+       * （multichat / html-deck-studio 同款注册形状，SessionProvider 由宿主注入）。
+       * web（http 起源）不用 Dock：工作台 iframe 里的 DSH 对话本来就是好的。
+       */
+      if (DESKTOP_SHELL) {
+        ctx.effect(
+          () => ctx.slots.inject("shell.overlay", () => ctx.slots.register({
+            name: "shell.overlay",
+            id: `${WORKBENCH_KEY}.chat`,
+            order: 58,
+            children: { [CHAT_SLOT]: { kind: "single", scope: "session" } },
+          }, DeckChatDock)),
+          "deck-studio: chat dock",
+        );
+        ctx.effect(
+          () => ctx.slots.inject(CHAT_SLOT, () => ctx.slots.register({ name: CHAT_SLOT }, DeckChatBody)),
+          "deck-studio: chat dock body",
+        );
+      }
 
       if (!chatEmbed) {
         /* 工作台顶栏「☰ DSH」→ 宿主：临时展开 / 收起左侧栏（需要看会话、插件、设置时用）。 */

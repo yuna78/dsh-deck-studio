@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.2.14] · 2026-11-04
+
+> 本版主修 **DSH Desktop（Electron 宿主）里的使用体验**：desktop 里左栏对话卡在 "Loading plugins…"、
+> 源里出好的整页图全部显示「未出图」、Inspector 报“读取正文失败”这一整类问题，根因都是
+> 「桌面宿主的页面起源于自定义协议 `dsh-app://`，嵌套 DSH 子帧拿不到 boot 注入、流式端点也不可达」。
+> 这一版把桌面里的对话换成宿主原生渲染，同屏保住。
+
+### 功能
+
+- **桌面：原生会话 Dock（F-202B / ADR-0027）**：Deckline 工作台在桌面宿主里不再内嵌 DSH 子页面。
+  改为用宿主 `shell.overlay` + `SessionProvider` + `sessions.retain` 把**真·原生会话**渲染到工作台
+  对话列的位置——聊天是原生的（附件 / 工具调用 / 审批 / 流式全都在），而且「左对话 + 右画布」
+  **同屏保住**。绑定 chip / 会话菜单 / ＋ / ↗ 顶部三件全部保留；桌面里新建 / 切换会话自动绑定当前
+  deck，不再产生未绑定会话；`sessions.retain` 报"目录未就绪"（unknown session）时视为自愈错误短重试。
+- **桌面：会话数据对齐预置**：桌面宿主实例此前不读受控源 deck 配置——源里已出好的整页图全部显示
+  「未出图」、Inspector 报「读取正文失败：当前数据目录没有这本 deck 的 script」。桌面实例需在宿主
+  profile 里配 `dataRoot` / `decks` / `projectsRoot`（与产品 profile 同源）即可对齐，见 docs/install.md。
+- **入口与降级**：桌面 Dock 未就绪时对话列显示降级卡（「在宿主主区打开」）；
+  `#chatDockArea` 空态有「还没有绑定会话——点上方 ＋ 新建」提示；对话列顶栏 pill 桌面显示
+  「对话 · 原生（桌面 Dock）」，可一键切回工作台。
+
+### 修复
+
+- **Dock 显示错会话**：桌面里隐藏了原 iframe，但其 localStorage 继承宿主 origin——工作台把
+  宿主当前会话读成了"这一页的会话"，1.2s 心跳会把 Dock 顶掉。现在桌面只读工作台维护的绑定
+  会话状态，绑哪本 deck 就显示哪本。
+- **＋ 新建失败可见 + 工作区守卫**：会话失败原因写进绑定徽标（之前只写按钮 title，用户看起来
+  像点了没反应）；桌面 shell 的 `process.cwd()` 指向 App 包目录，不再把它登记成用户工作区
+  （守卫 App 包 / 系统 / 私有路径），落到 deck 源工作区或默认工作区；`/Applications/…` 之类的
+  系统路径不会被误登记。
+- **契约测试**：新增 `verify/client-dock.mjs`（Dock 注册形状 + 桥接 wiring 契约，无 DOM）挂进
+  `npm run smoke`；修一处 smoke 对本机 `location.json` 指针的环境敏感失败。
+
+### harness
+
+- 云端 PR 流与产物完整性门禁（F-200 / F-201）：GitHub Actions（node 22/24 双矩阵）跑全量 smoke /
+  静态门禁 / 公开包白名单 + 包白名单；公开仓 integrity 门禁 + PR 模板与纪律（分支 → PR → 双农梯绿
+  → squash）；公开仓 main 已加禁强推 / 禁删 ruleset。desktop 排障链条全记录：上游问题单材料
+  （desktop 壳子帧 boot 注入 / 流可达的最小复现）已整理成文件待报给 DSH 上游。
+
+### 已知限制
+
+- 桌面对话 Dock 依赖宿主 `shell.overlay` + `SessionProvider` 契约（DSH 0.2.1-rc.5 验证）；web 宿主
+  （http 起源）行为不变，仍走工作台内嵌 DSH 对话。
+- 桌面实例需在宿主 profile 里配置插件的 `dataRoot` / `decks` / `projectsRoot`，否则只有工作副本可见、
+  源图与正文读不到——链接安装后请按 docs/install.md 对齐。
+
 ## [0.2.13] · 2026-10-31
 
 ### 功能

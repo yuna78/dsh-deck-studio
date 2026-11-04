@@ -286,6 +286,11 @@
       </div>
       <div class="chat-session-menu" id="chatSessionMenu" hidden></div>
     </div>
+    <div id="chatDockArea" hidden title="这里由宿主渲染原生会话（桌面 Dock）"></div>
+    <div id="chatHostCard" hidden>
+      <p class="chat-host-hint">桌面 App 里内嵌 DSH 页面无法启动（子帧拿不到 boot 注入）。宿主原生会话 Dock 没有就绪——对话将<b>在宿主主区</b>打开，点 ☰ 或左侧栏 Deckline 行切回工作台。</p>
+      <button type="button" class="btn alt" id="chatHostOpen">在宿主主区打开对话 →</button>
+    </div>
     <iframe id="nativeChatFrame" title="DSH 原生对话"></iframe>
   </aside>
   <div class="splitter" data-split="nav" title="拖动调整对话栏宽度" hidden></div>
@@ -583,6 +588,14 @@ let SETTINGS_FORM_DIRTY = false;
 
 const STATE = { sid: null, sessionTitle: "", data: null, selected: null, running: false, demo: false, tab: "deck", entityKind: "", sig: "", docCache: {}, docLoading: null, view: "home", deckId: null, rightTab: "", sessions: [], editorPage: null, ndStyleAbbr: "", designCards: [] };
 const EMBED = new URLSearchParams(location.search).get("embed") === "1";
+/**
+ * F-202B：桌面宿主（自定义协议 `dsh-app://app`）的 DSH 子帧拿不到 boot 注入（`__DSH_BOOT_READY__`
+ * 只注入主帧），流式端点也在子帧 404 —— `/?decklineChat=1` 嵌套实例永远停在「Loading plugins…」。
+ * 桌面上对话改走宿主原生（client.js 的 conversation 桥 → 宿主 uiWorkspace.openSession，会话开在宿主主区）；
+ * web 版（http 起源，如 13090 / 3080）保持 iframe 内嵌不动。
+ */
+const DESKTOP_HOST = !/^(https?:)$/.test(location.protocol)
+  || new URLSearchParams(location.search).get("chatHost") === "panel";
 
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const getEl = (id) => document.getElementById(id);
@@ -4898,6 +4911,7 @@ function decorateNativeChat(doc) {
 
 function setupNativeChat() {
   if (EMBED) return; // embed 模式下宿主 shell 本身就有原生 Chat
+  if (DESKTOP_HOST) return setupHostChatColumn(); // F-202B：桌面不嵌 DSH 页面
   const column = getEl("chatCol");
   const frame = getEl("nativeChatFrame");
   const splitter = document.querySelector('.splitter[data-split="nav"]');
@@ -4937,6 +4951,92 @@ function setupNativeChat() {
   });
 }
 
+/**
+ * 桌面（dsh-app://app）的对话列：不嵌 DSH 页面，把头部保留成「绑定 + 会话切换」，
+ * 动作经宿主桥（client.js）在宿主主区打开原生会话；打开成功后关闭工作台面板。
+ */
+function setupHostChatColumn() {
+  const column = getEl("chatCol");
+  const frame = getEl("nativeChatFrame");
+  const splitter = document.querySelector('.splitter[data-split="nav"]');
+  if (!column || !frame) return;
+  column.hidden = false;
+  if (splitter) splitter.hidden = false;
+  document.body.classList.add("has-chat");
+  frame.hidden = true;
+  getEl("chatDockArea").hidden = false;
+  STATE.dockActive = false;
+  // 降级卡：宿主原生 Dock 没接上（少见；比如 shell.overlay 契约缺失）时，退回「在主区打开」。
+  const fallbackTimer = setTimeout(() => {
+    if (!STATE.dockActive) getEl("chatHostCard").hidden = false;
+  }, 6000);
+  // 心跳把当前绑定会话报给宿主：Dock 据此用原生会话盖住 #chatDockArea。
+  let lastPublished = "§init§";
+  const publishChatSession = () => {
+    const sessionId = currentChatSessionId();
+    if (sessionId === lastPublished) return;
+    lastPublished = sessionId;
+    try { window.parent?.postMessage({ type: "dsh-deck-studio:chat-session", sessionId }, "*"); } catch { /* 宿主桥不可用 */ }
+  };
+  setInterval(publishChatSession, 1200);
+  try { window.parent?.postMessage({ type: "dsh-deck-studio:chat-session", sessionId: lastPublished = currentChatSessionId() }, "*"); } catch { /* 同上 */ }
+  window.addEventListener("message", (event) => {
+    if (event.source !== window.parent) return;
+    if (event.data?.type !== "dsh-deck-studio:chat-dock") return;
+    STATE.dockActive = true;
+    getEl("chatHostCard").hidden = true;
+    clearInterval(fallbackTimer);
+  });
+  getEl("chatBindChip").addEventListener("click", () => {
+    if (!getEl("chatBindChip").classList.contains("unbound")) return;
+    bindCurrentChatToTarget().catch(() => {});
+  });
+  getEl("newChatBtn").addEventListener("click", () => {
+    newChatForTarget().catch(() => {});
+  });
+  // ↗（在 DSH 里打开完整对话）：桌面=显式把会话开到宿主主区；web=开独立窗口。
+  getEl("expandChatBtn").addEventListener("click", () => takeMainAreaOnHost());
+  getEl("chatHostOpen").addEventListener("click", () => takeMainAreaOnHost());
+  getEl("chatSessionBtn").addEventListener("click", (event) => {
+    event.stopPropagation();
+    toggleChatSessionMenu();
+  });
+  document.addEventListener("click", (event) => {
+    const menu = getEl("chatSessionMenu");
+    if (menu.hidden) return;
+    if (menu.contains(event.target) || event.target.closest?.("#chatSessionBtn")) return;
+    menu.hidden = true;
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") getEl("chatSessionMenu").hidden = true;
+  });
+  document.body.classList.add("desktop-host");
+  refreshSessions().then(renderChatHeader).catch(() => renderChatHeader());
+}
+
+/** 桌面：显式把会话开到宿主主区（优先当前会话，其次最近绑定，再不行 ensure 一个）。
+ * 成功后宿主关闭工作台面板——这是唯一的「跳出工作台」路径。 */
+async function takeMainAreaOnHost() {
+  const target = activeChatTarget();
+  const current = currentChatSessionId();
+  const target_ = target;
+  const bound = target_ ? chatSessionsForTarget(target_) : [];
+  const sessionId = current || bound[0]?.sessionId || "";
+  return requestConversation({
+    action: sessionId ? "open" : "ensure",
+    sessionId,
+    kind: target_?.kind,
+    id: target_?.id,
+    title: target_?.label,
+    takeMain: true,
+    prompt: sessionId
+      ? undefined
+      : target_
+        ? `本对话绑定 ${target_.kind === "deck" ? `deck ${target_.id}（${target_.label}）` : `风格设计 ${target_.label}`}。等我的指令，不要直接出图。`
+        : undefined,
+  });
+}
+
 function copyText(text) {
   try {
     navigator.clipboard.writeText(text);
@@ -4946,13 +5046,13 @@ function copyText(text) {
   }
 }
 
-/** 工作台 → 原生 Chat 的窗口：非 embed 用左栏自己的 iframe，embed 用宿主 DSH 壳。 */
+/** 工作台 → 原生 Chat 的窗口：非 embed 用左栏自己的 iframe；embed / 桌面用宿主 DSH 壳。 */
 function nativeChatWindow() {
-  if (!EMBED) {
+  if (!EMBED && !DESKTOP_HOST) {
     const frame = getEl("nativeChatFrame");
     return frame && frame.contentWindow ? frame.contentWindow : null;
   }
-  return window.parent !== window ? window.parent : null; // embed：宿主 DSH 壳
+  return window.parent !== window ? window.parent : null; // embed / 桌面：宿主 DSH 壳
 }
 
 function requestNativeChat(text) {
@@ -5008,6 +5108,9 @@ function requestConversation(payload) {
       workspacePath: STATE.data?.workspacePath || "",
       sourceRoot: STATE.data?.active?.sourceRoot || "",
       ...payload,
+      // F-202B：桌面 Dock 模式默认不抢主区（open:false）；显式 takeMain → open:true 切宿主主区。
+      // web 不传 open（undefined → 宿主按原语义 openSession）。
+      open: DESKTOP_HOST ? payload.takeMain === true : undefined,
     }, "*");
     setTimeout(() => {
       if (settled) return;
@@ -5075,6 +5178,8 @@ async function ensureDeckConversation(deckId) {
     kind: "deck",
     id: deckId,
     title: label,
+    // 桌面：点 deck 是进工作台，不是切出去聊天——后台 ensure，不切换宿主视图。
+    
     prompt: `本对话绑定 deck ${deckId}（${label}）。后续所有修改都在这个 deck 上进行；先读 intent 与 script 概要，等我的指令，不要直接出图。`,
   });
   if (!result.ok) {
@@ -5127,6 +5232,12 @@ async function openBoundConversation(sessionId) {
     getEl("homeGreetSub").textContent = `没能切到会话：${result.reason || "未知原因"}`;
     return;
   }
+  if (DESKTOP_HOST) {
+    // 桌面：用户点会话就是要对话；宿主主区已切到该会话，收起工作台（回工作台时再对齐到绑定的 deck）。
+    STATE.chatSessionId = sessionId;
+    showDeck(binding?.kind === "deck" ? binding.id : null);
+    return;
+  }
   if (binding?.kind === "deck") {
     showDeck(binding.id);
     return;
@@ -5170,8 +5281,11 @@ function activeChatTarget() {
   return chatTargetForBinding({ kind: "deck", id: active.deckId });
 }
 
-/** 当前 Chat 所在会话 id：优先读 iframe 里 shell 的 dsh.sessions.current（同源），退回本地记录。 */
+/** 当前 Chat 所在会话 id：优先读 iframe 里 shell 的 dsh.sessions.current（同源），退回本地记录。
+ * F-202B：桌面宿主不读——隐藏 iframe 继承 dsh-app origin，localStorage 就是
+ * 宿主 shell 的存储，读到的是「宿主当前会话」而不是本 deck 绑定会话（Dock 被它顶掉）。 */
 function currentChatSessionId() {
+  if (DESKTOP_HOST) return STATE.chatSessionId || "";
   try {
     const win = getEl("nativeChatFrame")?.contentWindow;
     const raw = win?.localStorage?.getItem("dsh.sessions.current");
@@ -5284,6 +5398,7 @@ function renderChatSessionMenu(sessions, target) {
     STATE.chatSessionId = sessionId;
     await refreshSessions();
     renderChatHeader();
+    // 桌面：会话已在宿主主区打开，把工作台面板让出来（web 版留在内嵌 iframe 里）。
   }));
 }
 
@@ -5482,6 +5597,9 @@ async function newChatForTarget() {
   try {
     const result = await requestConversation({ action: "ensure", kind: target.kind, id: target.id, title: target.label });
     if (!result.ok || !result.sessionId) {
+      // F-202B：失败要用户可见——之前只写按钮 title，Dock 模式下看起来像「点了没反应」。
+      getEl("chatBindChip").textContent = "会话新建失败";
+      getEl("chatBindChip").title = `新建会话失败：${result.reason || "未知原因"}；点这里重试`;
       getEl("chatSessionBtn").title = `新建会话失败：${result.reason || "未知原因"}`;
       return;
     }
@@ -5489,6 +5607,7 @@ async function newChatForTarget() {
     await bindConversation({ sessionId: result.sessionId, kind: target.kind, id: target.id, title: target.label });
     await refreshSessions();
     renderChatHeader();
+    // 桌面：新建就是要点开聊——切到宿主主区的原生会话。
   } finally {
     button.disabled = false;
   }
@@ -5761,7 +5880,7 @@ function backToManual(box) {
   getEl("updateBtn").addEventListener("click", checkPluginUpdate);
   getEl("repoBtn").addEventListener("click", openRepo);
   await refreshSessions();
-  getEl("save").textContent = EMBED ? "对话在 DSH 原生 Chat" : "对话在左侧 · DSH 原生";
+  getEl("save").textContent = EMBED ? "对话在 DSH 原生 Chat" : DESKTOP_HOST ? "对话 · 原生（桌面 Dock）" : "对话在左侧 · DSH 原生";
   // F-69：只有 profile 开了 hideShellSidebar，宿主左侧栏才会默认收起；此时顶栏给一个切换入口。
   if (!EMBED && window.parent !== window && STATE.data?.hideShellSidebar === true) {
     const shellBtn = getEl("shellSidebarBtn");
