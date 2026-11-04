@@ -45,7 +45,7 @@
   },
   "scripts": {
     "verify": "node verify/smoke.mjs",
-    "prepublishOnly": "node verify/smoke.mjs",
+    "prepublishOnly": "node -e \"const fs=require('fs');const{execSync}=require('child_process');if(fs.existsSync('verify/smoke.mjs')){execSync('node verify/smoke.mjs',{stdio:'inherit'})}else{console.log('[prepublishOnly] verify/ 不在发布目录（公开包白名单不含），跳过；发布前请在开发仓跑 npm run smoke')}\"",
     "prepack": "node scripts/prepack-assets.mjs"
   },
   "dsh": {
