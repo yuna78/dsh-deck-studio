@@ -20,7 +20,7 @@ const orPlaceholder = (value, hint) => (pad(value) ? pad(value) : `（待补：$
  * intent.md 初始内容。
  * @param {{title:string, audience?:string, topic?:string, intent?:string, references?:string, created?:string, owner?:string}} input
  */
-export function buildIntentMarkdown({ title, audience = "", topic = "", intent = "", references = "", occasion = "", success = "", scopeOut = "", argument = "", skeletonType = "", pageOrder = "", keepThree = "", created = "", owner = "" } = {}) {
+export function buildIntentMarkdown({ title, audience = "", topic = "", intent = "", references = "", occasion = "", success = "", scopeOut = "", argument = "", skeletonType = "", pageOrder = "", keepThree = "", created = "", owner = "", creationMode = "" } = {}) {
   const heading = pad(title) || "（deck 标题）";
   return [
     "---",
@@ -28,10 +28,15 @@ export function buildIntentMarkdown({ title, audience = "", topic = "", intent =
     `owner: ${owner}`,
     ...(created ? [`created: ${created}`] : []),
     "status: draft",
+    // 0.2.18：探索式建档留痕——重启 / 重读 intent 时仍然知道这本是「边聊边定」的。
+    ...(creationMode === "explore" ? ["creation-mode: explore"] : []),
     "---",
     "",
     "# 意图",
     "",
+    ...(creationMode === "explore"
+      ? ["- **创建模式**：探索式 —— 简报随对话补充；下面「待补」的字段由 Agent 逐条问清楚，不是漏填表单。"]
+      : []),
     `- **听众**：${orPlaceholder(audience, "讲给谁：角色 / 部门 / 层级 / 对 AI 的熟悉度")}`,
     `- **主题**：${orPlaceholder(topic || heading, "一句话说清这场讲什么")}`,
     `- **带走**：${orPlaceholder(intent, "听完他们应该能带走什么（1–3 条，可验证）")}`,

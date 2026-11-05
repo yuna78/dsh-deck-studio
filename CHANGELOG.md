@@ -1,5 +1,227 @@
 # Changelog
 
+## [0.2.24] · 2026-11-05
+
+> 全屏演示的整页图不放大：1280×720 的页面在大屏上缩在中间一小块，四周全是留白。
+
+### 修复
+
+- **放映图只写 `max-width / max-height`**：这两个属性只负责**缩小**，不放大——页面图（源里 baseline
+  常见 1280×720）在 2K/5K 屏上就永远是自然尺寸。改成 `width/height: 100%` + `object-fit: contain`，
+  大图缩小、小图放大都按比例铺满可用区域（保留 16:9 不裁切）。
+- 阴影从 `box-shadow` 换成 `filter: drop-shadow`，跟着图片轮廓走；否则元素盒是整块舞台，
+  会出现一大圈方形阴影压在画面上。
+
+### 验证
+
+- 用 headless Chrome 按用户屏幕尺寸 **2730×1536** 渲染同一张页图（`samples/deckline-intro/pages/p01.png`，
+  1280×720）做前后对比：旧样式图宽约 1155px（约 42%，四周大片留白，与反馈截图一致）；
+  新样式铺满到约 2540px 宽（留 22px 边距 + 底部工具条位置），16:9 比例不变。
+- `node --check` 不涉及；CSS 改动后跑公开仓 integrity 门禁（三处版本 0.2.24）。
+
+## [0.2.23] · 2026-11-05
+
+> 回滚 0.2.22 的一次激进改动，并给 Dock 加错误边界 + 尺寸夹取：不再出现「整片变灰、啥也看不到」。
+
+### 修复
+
+- **回退 `sessionId` 透传（0.2.22）**：真机上出现「点账对话 → 原生界面 → 5–10s 后工作台闪出 →
+  不到 1s 整片变灰」。让 `conversation.content` 在 `shell.overlay` 上下文里带 `sessionId` 去查宿主的
+  主区 `pendingInteraction`，会把整棵 Dock 子树搞崩且不报错。先回退，保住对话可用——ask 的露出另想办法。
+- **Dock 错误边界**：`DockErrorBoundary` 收住 Chat Dock 子树的任何渲染异常，把错误原因、重试按钮和
+  「去宿主主区对话」的出路画在对话列里，不再退化成一片空白灰。
+- **Dock 尺寸夹取**：测量偶尔会拿到「整窗」尺寸（面板刚切换、iframe 还没布局），fixed 覆盖层会盖住
+  整个应用。现在 left/top/width/height 都夹在视口内，最小 120×160。
+
+### 验证
+
+- `node --check client.js` 通过；`DockErrorBoundary` / 视口夹取 / 回退后的 `DeckChatBody` 都在产物内。
+- 公开仓 integrity 门禁本地跑通（三处版本 0.2.23）。
+
+### 已知限制
+
+- 桌面 Dock 里 ask / 审批仍然不显示（这是 0.2.22 想解决但方式不安全的问题）。下一步计划：
+  在对话列顶部给「有待处理的确认」横条 + 一键在宿主主区打开该会话，而不是在主区 overlay 里硬渲染。
+
+## [0.2.22] · 2026-11-05
+
+> 修「Agent 的 ask / 审批在工作台对话列里不弹，必须退出工作台去主区对话才看得到」。
+
+### 修复
+
+- **Dock 没把 `sessionId` 透给 `conversation.content` factory（P0）**：宿主的 composer 链靠
+  `useSessionStatus(s => s.get(sessionId)?.pendingInteraction)` 取待处理交互，再
+  `renderSlotChain("conversation.composer", { sessionId, session, pendingInteraction })`；
+  审批 / 提问面板（`dsh-client-ui-approval` 注册在 `conversation.composer` 上，`select` 判 `PendingApproval`）
+  只有拿到 `pendingInteraction` 才渲染。我们以前只传 `{ variant, phase, hero }` → factory 里
+  `sessionId` 是 `undefined` → `pendingInteraction` 恒为 `undefined` → Dock 里一个 ask 都不弹。
+  现在把会话 id 透传下去（槽位 props 优先，退回 Dock 当前 retain 的 `sessionId`）。
+- 顺带让内嵌路径同样带上 id（`variant: "embedded"` + sessionId），行为与主区对话一致。
+
+### 验证
+
+- `node --check client.js` 通过。
+- 依据宿主产物核对链路：`dsh-client-ui-conversation/lib/client.js` 的 composer 链确实以
+  `sessionId` 取 `pendingInteraction`；`dsh-client-ui-approval/lib/client.js` 确实按
+  `pendingInteraction instanceof PendingApproval` 选择渲染面板 —— 说明缺的就是这个入参。
+- 公开仓 integrity 门禁本地跑通（三处版本 0.2.22）。
+
+## [0.2.21] · 2026-11-05
+
+> 修「点左侧会话，工作区弹出来了，但停在首页而不是那本 deck」。
+
+### 修复
+
+- **指令来得比脚本还早（P0）**：工作台 iframe 的 `open-binding` 监听原本注册在 boot **末尾**
+  （中间还有 `loadWorkbench` / `refreshSessions` 等多次 await），而宿主在面板刚挂载时就 postMessage，
+  且发完立刻清掉了 pending —— 消息直接丢失，面板只好停在工作区首页。
+  现在监听在脚本**最开头**注册：没 boot 完先暂存，boot 完再执行（`OPEN_BINDING` 队列）。
+- **加送达确认**：工作台执行完回 `dsh-deck-studio:open-binding-ack`；宿主**收到 ack 才清 pending**，
+  期间由 `workbench-ready` + 60/220/600/1400/2600/4200ms 多档重试兜底，20s 未 ack 才放弃。
+  之前是「发出去就当送达」，面板重挂载那次必然丢。
+- **失败可见**：deck / design 画布打不开时 flash 具体原因，并回 `ok:false` 的 ack（宿主记 warning）。
+
+### 验证
+
+- `node --check client.js` 通过；workbench 内联脚本 parse 通过。
+- 时序核对：监听注册位置在脚本第 1 段（早于所有 await）→ 面板挂载瞬间到达的消息也能落到 pending；
+  boot 末尾 `booted = true` 先置位再消费 pending，避免消费过程中新指令被吞。
+- 公开仓 integrity 门禁本地跑通（三处版本 0.2.21）。
+
+## [0.2.20] · 2026-11-05
+
+> 修「新建 deck 后点发送：会话建出来了，但绑定没写成、工作区不弹、提示 session … is not retained」。
+
+### 修复
+
+- **发首条指令前没有 retain（P0）**：`sendToSession` 直接 `sessions.scope(sessionId)`，而刚建出来的会话
+  还没被 Dock retain 过 → scope 为 null → 抛 `session … is not retained` → 整条 `ensure` 失败。
+  后果是连锁的：工作台不写绑定（deck 变「未绑定」）、Dock 不出会话、从侧栏点这个会话也拉不起工作区。
+  现在发之前先自己 `sessions.retain(sessionId, { source })` 再取 scope。
+- **首条指令失败不再拖垮绑定**：`ensure` 拿到会话后即使 prompt 没发出去，也返回 `ok: true` 并带
+  `notice`（「会话已建好并绑定，但首条指令没发出去…」），工作台照写绑定、照弹工作区，提示用 toast 显示。
+- **失败可见**：`ensureDeckConversation` 打开会话失败时除了改 chip，再弹一条 error toast（之前只改徽标文案）。
+
+### 验证
+
+- `node --check client.js` 通过；workbench 内联脚本 parse 通过。
+- 公开仓 integrity 门禁本地原样跑通（三处版本 0.2.20、隐私 0 命中）。
+- 复现链路核对：截图里 `session-5e98b127… is not retained` 正是 `sendToSession` 的第 565 行旧逻辑抛出，
+  修复后就地 retain；prompt 失败降级为 notice，不再中断绑定。
+
+## [0.2.19] · 2026-11-05
+
+> 修 0.2.18 的排版事故：新建弹窗里「表单 / 探索」两张卡各占半屏、文字竖排成一列。
+
+### 修复
+
+- **模式卡被基础 input 规则接管**：`.nd-mode-opt input{width:auto}` 与
+  `.newdeck-body input{width:100%}` **同权重**、且前者写在前面，于是 radio 拿到 `width:100%` +
+  `padding:7px 9px`，撑满整行，把文字挤成一字一行、卡片被顶到半屏高。
+  现在改成 `.newdeck-body .nd-mode-opt input[type="radio"]`（权重更高）并且整块样式挪到基础 input
+  规则**之后**，radio 恢复原生尺寸（顺带 `accent-color` 对齐主题色）；卡片改用两列 grid。
+- **探索模式漏藏「成功标准」**：字段清单少列了 `ndSuccess`，切到探索模式还留着这一栏。
+  已补进清单，并让「场合 / 成功标准」这种成对行在两个字段都藏起来时整行收掉（不留空栅格）。
+
+### 验证
+
+- 用 headless Chrome 把新建弹窗单独渲染成图（表单模式 900×1150、探索模式 900×640）逐张核对：
+  两张模式卡并排、高度正常、文字横排；探索模式只剩「标题 + 风格 + 说明」。
+- workbench 内联脚本 parse 通过；公开仓 integrity 门禁本地跑通（三处版本 0.2.19）。
+
+## [0.2.18] · 2026-11-05
+
+> 新建 Deck 支持**表单模式 / 探索模式**：主意还模糊时，一句标题也能开工，边聊边把简报定清楚。
+
+### 功能
+
+- **两种开工方式（对齐 html deck-studio 的 form / explore）**：新建弹窗顶部加模式切换。
+  表单模式不变（受众 / 意图 / 页数 / 密度 / 场合 / 边界 / 参考资料先填）；
+  探索模式只留「标题 + 风格」，其余字段隐藏但**保留已填值**（切回表单还在），页数先占 1 页占位。
+  隐藏用的是显式 `display:none` + 取消 `required`——`.newdeck-body .field` 是 `display:flex`，
+  单靠 `hidden` 属性和原生校验会互相打架。
+- **探索式建档留痕**：`createDeck` 接受 `mode: "explore"`，`script.md` / `intent.md` frontmatter 写
+  `creation-mode: explore`，意图页顶部加一行「创建模式：探索式 —— 简报随对话补充」，
+  免得后面读到「待补」被当成漏填表单；注册表与 `deck.created` 事件也记 `creationMode`。
+- **探索式首条 prompt**：建完直接把一段「别问我要表单、按顺序带我想清楚」的指令发进会话——
+  一次问完 3–5 个关键问题 → 用 `deck_doc_update` 回写 intent（没依据标「待确认」不编）→
+  给一版故事线草案（页数不确定给区间）→ 我确认后才动 script，出图要明确说。
+
+### 验证
+
+- 服务端实跑（临时 dataRoot）：探索式建档 → `pages=1`、`script.md` 与 `intent.md` 都带
+  `creation-mode: explore`、意图页有「创建模式：探索式」、注册表 `creationMode: explore`、
+  `state()` 里这本 deck 正常列出。
+- 表单模式回归：`pages=4` 建出 4 页、无探索标记、意图里的受众原样保留。
+- `node --check`（index.js / client.js / lib/deck-templates.js）与 workbench 内联脚本
+  （255,824 字符）parse 通过；公开仓 integrity 门禁本地跑通（三处版本 0.2.18）。
+
+## [0.2.17] · 2026-11-05
+
+> 对齐 html deck-studio 的新交互：**从左侧会话直接拉起工作区开始干活**，不用先点 Deckline 面板再挑 deck。
+
+### 功能
+
+- **会话 → 工作区（一步进入）**：客户端订阅宿主 `sessions.list`，读「当前主区会话」
+  （`retainedBy.mainView`）；切到一本**已绑定 deck / design 的会话**时自动 `selectPanel` 打开
+  Deckline 工作台并切到那本 deck（design 绑定则进它的风格画布）。守卫与 html deck-studio 同构：
+  启动时先只记当前会话（不抢视图）、会话变化那一刻主区若停在别的插件面板就不抢、260ms 防抖 +
+  token 校验避免连点乱跳。
+- **会话行「⋯」菜单入口**：`sidebar.workspaces.session.menu.item` 增加「在 Deckline 打开」——
+  选中某个会话即可把它的 deck 拉到工作台；**未绑定**的会话不再静默，工作台会弹出提示告诉你怎么绑。
+- **iframe 就绪握手**：工作台加载完主动发 `dsh-deck-studio:workbench-ready`，宿主把待发的
+  「打开某本 deck」补发一次（外加 60/220/600/1400ms 重试），避免面板刚挂载时丢指令。
+
+### 验证
+
+- `node --check client.js` 通过；workbench.html 内联脚本（253,778 字符）parse 通过。
+- 公开仓 integrity 门禁本地原样跑通：三处版本一致 0.2.17、隐私扫描 0 命中。
+- 复用 html deck-studio 已在真机验证过的同款守卫（面板判定 / 防抖 / ready 桥接），未改其协议名。
+
+## [0.2.16] · 2026-11-04
+
+> 修的是「从没有会话的 deck，点 ＋ 新建会话没反应、永远绑不上」。
+
+### 修复
+
+- **无会话 deck 建不出会话（P0）**：桌面宿主里 `resolveSessionWorkspace` 的三级全落空——shell `cwd`
+  是 profile 目录（被工作区守卫挡掉）、源目录还没登记成工作区、客户端 `workspaces` 服务也没有
+  `initializeDefault`——于是每次都抛「无法确定启动工作区」，deck 只要有会话就能续聊、没有会话就
+  永远建不出来。现在服务端在工作台载荷里给出 `active.sessionWorkspacePath`（deck 项目目录，
+  源落在 `node_modules` / App 包时退回 `<dataRoot>/decks/<id>`），宿主桥按它建/复用工作区
+  （尽力重命名为 `Deckline · <deck 名>`，重名不影响建会话）。
+- **点了 ＋ 没反应**：`newChatForTarget()` 在拿不到目标时静默 `return`、失败只写进 chip 的 title。
+  现在两种失败都走常驻 toast（含宿主返回的原因），并且 `catch` 里的异常也不再被吞掉。
+
+### 验证
+
+- `node --check` 通过（client.js / index.js）；workbench.html 内联脚本 parse 通过、deck 卡片模板
+  `<div>` 开闭平衡；公开仓 integrity 门禁本地原样跑通（三处版本一致 0.2.16）。
+- 载荷核对：`active.sessionWorkspacePath` 在示例 deck 上给出 `<dataRoot>/decks/sample-deckline-intro`
+  （源在插件安装位，按预期回落），普通 deck 给出其源目录。
+
+## [0.2.15] · 2026-11-04
+
+> 修的是「装完打开，默认 deck 一屏空白、资源明明在却不显示」这一类。
+
+### 修复
+
+- **ghost deck 补挂（P0）**：工作副本里还留着 `decks/<id>/deck.json`、但注册表 / profile 的 `decks`
+  里已经没有条目的 deck，过去只在列表里露一个标题（没有 adapter）——源里已出好的整页图 baseline、
+  资源库、封面、9 份文档全都拿不到，打开就是一屏「未出图」的空白页，看起来像「资源都在就是没显示」。
+  现在启动时按 manifest 的 `source.root` 补挂只读 adapter（`adoptManifestDecks()`，在 adapters 之前跑）；
+  源读不到的标 `unmounted`，首页卡片显示「源未挂载 · 只剩工作副本」，不再伪装成正常的空白 deck。
+- **示例 deck 常驻**：`bootstrapSampleDeck()` 过去用「`config.decks` 非空就跳过」判定，会被导入预设风格时
+  自动建的 8 本风格画布顶掉——装过风格的机器上示例 deck 永远不再登记，正是上面那种 ghost deck 的来源。
+  现在改成「这份示例没挂上才登记」；旧路径失效时自动回到包内 `seeds/samples/deckline-intro`。
+
+### 验证
+
+- 用本机真实数据目录（`<dataRoot>` = `~/.dsh/deckline`）的副本实跑安装包逻辑：`adapters` 9 本
+  （含 `sample-deckline-intro`），示例 deck 10 页 `slide.render` 全部非 null（`revision: "source"`，
+  p01 998 KB），`active.resources` 3 项，9 份文档 missing 由 9 降到 6（intent / script / materials 找回）。
+- 源被拔掉的 ghost deck：`unmounted: true` + `sourceAvailable: false` 在 `state` 与 `workbench` 两处载荷都带出。
+
 ## [0.2.14] · 2026-11-04
 
 > 本版主修 **DSH Desktop（Electron 宿主）里的使用体验**：desktop 里左栏对话卡在 "Loading plugins…"、

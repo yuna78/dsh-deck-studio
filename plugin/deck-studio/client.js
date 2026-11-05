@@ -339,7 +339,61 @@ div[data-sidebar-collapsed]{grid-template-columns:0px minmax(0px,1fr) 0px!import
         const session = useSession((value) => value);
         const active = useConversation((value) => value).activeTargets;
         const phase = (!session.blank || session.running || active.size > 0) ? "active" : "hero";
+        /**
+         * 0.2.23：**回退** 0.2.22 的 sessionId 透传。
+         *
+         * 为什么当时要透传：宿主的 composer 链是
+         *   useSessionStatus(s => s.get(sessionId)?.pendingInteraction) → renderSlotChain(...)
+         * 审批面板要靠 pendingInteraction 才渲染，我们没传 sessionId 就永远不弹 ask。
+         *
+         * 为什么回退：透传之后真机上「点会话 → 工作台闪出 → 不到 1s 整片变灰」——
+         * 说明在 shell.overlay 这个上下文里让 composer 链去查宿主的主区 pendingInteraction 会直接崩掉
+         * 整棵 Dock 子树（外面看不到原因，只看到灰屏）。宁可先保住对话可用，再想别的办法把 ask 露出来。
+         */
         return renderFactorySlot("conversation.content", { variant: "embedded", phase, hero: phase === "hero" }, { slots: { views: DeckChatView } });
+      }
+
+      /**
+       * 0.2.23：Dock 子树的错误边界。
+       *
+       * 之前 slot 里任何一个组件抛错，整个 overlay 会变成一片空白灰，用户完全不知道发生了什么
+       * （这次灰屏就是）。用边界把错误收住，至少把原因写在屏幕上 + 给重试和「去主区对话」的出路。
+       */
+      class DockErrorBoundary extends React.Component {
+        constructor(props) {
+          super(props);
+          this.state = { error: null };
+        }
+        static getDerivedStateFromError(error) {
+          return { error };
+        }
+        componentDidCatch(error) {
+          try {
+            ctx.logger?.warn?.("deck-studio: chat dock crashed", error);
+          } catch {
+            /* 日志不可用时忽略 */
+          }
+        }
+        render() {
+          if (!this.state.error) return this.props.children;
+          const message = String(this.state.error?.message ?? this.state.error ?? "未知错误");
+          return h(
+            "div",
+            { style: { height: "100%", padding: 16, overflow: "auto", background: "#fdf7f3", color: "#7a3b2e", fontSize: 12, lineHeight: 1.7 } },
+            h("div", { style: { fontWeight: 600, marginBottom: 6 } }, "对话区加载失败"),
+            h("div", { style: { color: "#5c6464", wordBreak: "break-word" } }, message),
+            h(
+              "button",
+              {
+                type: "button",
+                style: { marginTop: 10, marginRight: 8, padding: "4px 10px", fontSize: 12, cursor: "pointer" },
+                onClick: () => this.setState({ error: null }),
+              },
+              "重试",
+            ),
+            h("div", { style: { marginTop: 10, color: "#5c6464" } }, "也可以点顶栏「☰ DSH」去宿主主区的对话里继续。"),
+          );
+        }
       }
       /** Dock：测量工作台对话占位矩形；用 retain 的会话引用喂 SessionProvider。 */
       function DeckChatDock({ SessionProvider, renderSlot }) {
@@ -389,10 +443,18 @@ div[data-sidebar-collapsed]{grid-template-columns:0px minmax(0px,1fr) 0px!import
           try { frameEl.contentWindow.postMessage({ type: "dsh-deck-studio:chat-dock" }, "*"); } catch { /* 不可达时降级卡留着 */ }
         }, [rect, reference]);
         if (!SessionProvider || !renderSlot || !reference || !rect) return null;
+        // 0.2.23：把覆盖层夹在可视区内。测量一旦拿到「整窗」尺寸（面板刚切换、iframe 还没布局），
+        // 这个 fixed 覆盖层会把整个应用盖住，看起来就是「整片灰、啥也没有」。
+        const viewportW = typeof window !== "undefined" ? window.innerWidth : rect.width;
+        const viewportH = typeof window !== "undefined" ? window.innerHeight : rect.height;
+        const left = Math.max(0, Math.min(rect.left, Math.max(0, viewportW - 120)));
+        const top = Math.max(0, Math.min(rect.top, Math.max(0, viewportH - 120)));
+        const width = Math.max(120, Math.min(rect.width, viewportW - left));
+        const height = Math.max(160, Math.min(rect.height, viewportH - top));
         return h("div", {
           "data-deck-studio-chat-dock": "",
-          style: { position: "fixed", left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px`, zIndex: 40, display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden", background: "var(--paper,#faf8f2)", borderRight: "1px solid var(--line,#e8e2d6)", pointerEvents: "auto" },
-        }, h(SessionProvider, { session: reference }, renderSlot(CHAT_SLOT, {})));
+          style: { position: "fixed", left: `${left}px`, top: `${top}px`, width: `${width}px`, height: `${height}px`, zIndex: 40, display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden", background: "var(--paper,#faf8f2)", borderRight: "1px solid var(--line,#e8e2d6)", pointerEvents: "auto" },
+        }, h(DockErrorBoundary, null, h(SessionProvider, { session: reference }, renderSlot(CHAT_SLOT, {}))));
       }
       // 工作台左栏会把 DSH 原生 Chat 以 `/?decklineChat=1` 嵌进来（同源 iframe）。
       // 那个嵌套的 DSH 实例不再自动打开工作台，否则会层层嵌套（F-68）。
@@ -423,6 +485,140 @@ div[data-sidebar-collapsed]{grid-template-columns:0px minmax(0px,1fr) 0px!import
       };
       const closeWorkbench = () => layout?.selectPanel?.(null);
 
+      /**
+       * 0.2.17：从 DSH 侧栏的会话直接拉起 Deckline 工作区（对齐 html-deck-studio 的同款交互）。
+       *
+       * 宿主把「当前主区会话」记在 `sessions.list` 的 `retainedBy.mainView` 上。切到一本
+       * 已绑定 deck / design 的会话时，自动打开工作台并切到那本 deck —— 省掉「先点 Deckline
+       * 面板、再选 deck」两步；会话行「⋯」菜单里也给一个显式入口。
+       */
+      const activeMainSessionId = () => {
+        try {
+          const list = ctx.sessions?.list?.getSnapshot?.();
+          if (!list?.byId) return "";
+          return Object.values(list.byId).find((row) => (row?.retainedBy?.mainView ?? 0) > 0)?.id ?? "";
+        } catch {
+          return "";
+        }
+      };
+      const activePanelIdOf = () => {
+        try {
+          return layout?.panelInfo?.getSnapshot?.()?.activePanelId ?? null;
+        } catch {
+          return null;
+        }
+      };
+      /** 会话 → 绑定实体（服务端绑定表；3s 内复用，列表频繁变化时不重复打接口）。 */
+      let bindingsCache = { at: 0, rows: [] };
+      const readSessionBindings = async () => {
+        if (Date.now() - bindingsCache.at < 3000) return bindingsCache.rows;
+        try {
+          const res = await fetch("/api/deck-studio.session-bindings", { headers: { accept: "application/json" } });
+          const data = await res.json();
+          bindingsCache = { at: Date.now(), rows: Array.isArray(data?.bindings) ? data.bindings : [] };
+        } catch {
+          bindingsCache = { at: Date.now(), rows: bindingsCache.rows };
+        }
+        return bindingsCache.rows;
+      };
+      /**
+       * 待发往工作台 iframe 的「打开某个 deck / design」指令。
+       *
+       * 0.2.21：发出去**不清空**——面板刚挂载时 iframe 里的脚本还没起来，早发的那几帧会被丢掉，
+       * 表现成「工作区弹出来了但停在首页」。现在等 iframe 回 `open-binding-ack` 才算送达，
+       * 期间由 ready 消息 + 多档定时重试兜底；20s 还没 ack 就放弃，避免下次误打开旧 deck。
+       */
+      let pendingOpen = null;
+      const flushPendingOpen = () => {
+        const pending = pendingOpen;
+        const win = frameState.el?.contentWindow;
+        if (!pending || !win) return;
+        try {
+          win.postMessage({ type: "dsh-deck-studio:open-binding", ...pending }, "*");
+        } catch {
+          /* iframe 还没就绪：等 ready 消息或下一次重试 */
+        }
+      };
+      const scheduleFlush = () => {
+        [60, 220, 600, 1400, 2600, 4200].forEach((delay) => window.setTimeout(flushPendingOpen, delay));
+      };
+      const openBindingInWorkbench = (target) => {
+        if (!target || (!target.id && !target.notice)) return false;
+        openWorkbench();
+        pendingOpen = { kind: target.kind ?? "deck", id: target.id ?? "", title: target.title ?? "", notice: target.notice ?? "" };
+        flushPendingOpen();
+        scheduleFlush();
+        const expected = pendingOpen;
+        window.setTimeout(() => {
+          if (pendingOpen === expected) pendingOpen = null;
+        }, 20000);
+        return true;
+      };
+      /** 侧栏点了一个会话：已绑定就直接进那本 deck；没绑定就进工作台并说明怎么绑。 */
+      const openSessionInWorkbench = async (sessionId, options = {}) => {
+        const id = String(sessionId ?? "").trim();
+        if (!id) return false;
+        const rows = await readSessionBindings();
+        const binding = rows.find((row) => row?.sessionId === id) ?? null;
+        if (!binding) {
+          if (options.auto) return false;
+          return openBindingInWorkbench({
+            kind: "none",
+            id: "",
+            notice: "这个会话还没有绑定 deck / 风格：先选一本 deck，用「＋」新建或切换绑定。",
+          });
+        }
+        return openBindingInWorkbench({
+          kind: binding.kind === "design" ? "design" : "deck",
+          id: binding.id,
+          title: binding.title ?? "",
+        });
+      };
+      /** 会话行「⋯」菜单项：在 Deckline 里打开这个会话绑定的 deck（未绑定给可见提示）。 */
+      function OpenDecklineMenuItem({ sessionId, useMenuOpenState }) {
+        const menu = typeof useMenuOpenState === "function" ? useMenuOpenState : () => [false, () => {}];
+        const [, setMenuOpen] = menu();
+        const [busy, setBusy] = React.useState(false);
+        const label = busy ? "正在打开 Deckline…" : "在 Deckline 打开";
+        const onSelect = () => {
+          try {
+            setMenuOpen(false);
+          } catch {
+            /* 菜单状态不可用时仍然执行动作 */
+          }
+          if (busy) return;
+          setBusy(true);
+          void openSessionInWorkbench(sessionId).finally(() => setBusy(false));
+        };
+        return h(
+          "button",
+          {
+            type: "button",
+            role: "menuitem",
+            "aria-label": label,
+            "data-deck-studio-open": "",
+            disabled: busy,
+            style: {
+              width: "100%",
+              minHeight: 32,
+              padding: "0 12px",
+              fontSize: 13,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "flex-start",
+              textAlign: "left",
+              border: 0,
+              background: "transparent",
+              color: "var(--dsw-alias-label-primary)",
+              borderRadius: "var(--dsw-radius-sm)",
+              cursor: busy ? "default" : "pointer",
+            },
+            onClick: onSelect,
+          },
+          label,
+        );
+      }
+
       const currentSessionId = () => {
         try {
           const raw = window.localStorage.getItem("dsh.sessions.current");
@@ -435,7 +631,20 @@ div[data-sidebar-collapsed]{grid-template-columns:0px minmax(0px,1fr) 0px!import
         const sessions = ctx.sessions;
         if (!sessions?.scope) throw new Error("sessions service unavailable");
         if (!sessionId) throw new Error("no target session");
-        const scoped = sessions.scope(sessionId);
+        /**
+         * 0.2.20：刚建出来的会话还没被 Dock retain 过，`sessions.scope()` 就是 null——
+         * 以前直接抛 `session … is not retained`，于是「新建 deck 后点发送」整条链路失败：
+         * 会话建出来了却没绑定、工作区也不弹。这里先自己 retain 一次再取 scope。
+         */
+        let scoped = sessions.scope(sessionId);
+        if (!scoped && typeof sessions.retain === "function") {
+          try {
+            sessions.retain(sessionId, { source: WORKBENCH_KEY });
+          } catch (error) {
+            ctx.logger?.warn?.(`deck-studio: retain before send failed: ${error?.message ?? error}`);
+          }
+          scoped = sessions.scope(sessionId);
+        }
         if (!scoped) throw new Error(`session ${sessionId} is not retained`);
         // 会话级上下文需要显式 inject 才能拿到 conversation 服务。
         await new Promise((resolve, reject) => {
@@ -545,6 +754,28 @@ div[data-sidebar-collapsed]{grid-template-columns:0px minmax(0px,1fr) 0px!import
         const sourceRoot = String(data.sourceRoot ?? "").trim();
         const sourceWorkspace = sourceRoot ? containing(sourceRoot) : null;
         if (sourceWorkspace) return sourceWorkspace.workspaceId;
+        /**
+         * 0.2.16：deck 自己的项目目录（工作台载荷里的 sessionWorkspacePath）。
+         * 桌面宿主里上面几级会全落空——cwd 是 profile 目录被守卫挡掉、源目录还没登记成工作区、
+         * 客户端 workspaces 服务也没有 initializeDefault——结果是「从没有会话的 deck」
+         * 永远建不出会话、也就永远绑不上（点了 ＋ 没反应）。这里按 deck 项目目录建/复用工作区，
+         * 保证每本 deck 都有落点；工作区名只是侧栏文案，命名失败不影响建会话。
+         */
+        const projectPath = String(data.sessionWorkspacePath ?? "").trim();
+        if (projectPath) {
+          const existing = containing(projectPath);
+          if (existing) return existing.workspaceId;
+          const projectWorkspaceId = await register(projectPath);
+          const title = String(data.title ?? "").trim().slice(0, 60);
+          if (title && typeof workspaces.rename === "function") {
+            try {
+              await workspaces.rename(projectWorkspaceId, `Deckline · ${title}`);
+            } catch {
+              /* 工作区重名等失败只影响侧栏文案，会话照建 */
+            }
+          }
+          return projectWorkspaceId;
+        }
         const fallback = await workspaces.initializeDefault?.();
         if (fallback?.workspaceId) return fallback.workspaceId;
         throw new Error("无法确定启动工作区，未创建会话；请配置 workspacePath 后重试");
@@ -614,10 +845,18 @@ div[data-sidebar-collapsed]{grid-template-columns:0px minmax(0px,1fr) 0px!import
               if (lastError) throw lastError;
               if (data.takeMain === true && DESKTOP_SHELL) closeWorkbench();
             }
+            let notice = "";
             if (data.prompt && data.action === "ensure" && sessionId !== String(data.sessionId ?? "")) {
-              await sendToSession(sessionId, String(data.prompt));
+              // 0.2.20：首条指令发不出去不该让整条 ensure 失败——会话已经建好，
+              // 绑定必须照写（否则 deck 变「未绑定」，工作区也不会自动弹出来）。
+              try {
+                await sendToSession(sessionId, String(data.prompt));
+              } catch (error) {
+                notice = `会话已建好并绑定，但首条指令没发出去：${error?.message ?? error}；在工作台里再发一次即可。`;
+                ctx.logger?.warn?.(`deck-studio: prompt send failed after ensure: ${error?.message ?? error}`);
+              }
             }
-            reply({ ok: true, sessionId });
+            reply({ ok: true, sessionId, ...(notice ? { notice } : {}) });
           } catch (error) {
             ctx.logger?.warn?.("deck-studio: conversation bridge failed", error);
             reply({ ok: false, reason: String(error?.message ?? error) });
@@ -720,6 +959,78 @@ div[data-sidebar-collapsed]{grid-template-columns:0px minmax(0px,1fr) 0px!import
           return () => window.clearTimeout(timer);
         }, "deck-studio: auto-open workbench");
 
+        /**
+         * 0.2.17：切到「已绑定 deck / design 的会话」时自动拉起工作区。
+         * 只在会话真的换了、且主区没有停在别的插件面板时动作；启动时先只记住当前会话不抢视图，
+         * 工作台自己打开的那一下不算用户切换（pendingOpen / 自身面板判定都挡掉）。
+         */
+        ctx.effect(() => {
+          const store = ctx.sessions?.list;
+          if (!store?.subscribe) return undefined;
+          let primed = false;
+          let lastActive = "";
+          let timer = null;
+          let token = 0;
+          const onChange = () => {
+            const list = store.getSnapshot?.();
+            if (!list || list.phase !== "ready") return;
+            const active = activeMainSessionId();
+            if (!primed) {
+              primed = true;
+              lastActive = active;
+              return;
+            }
+            if (active === lastActive) return;
+            lastActive = active;
+            if (!active) return;
+            // 会话变化的那一刻取面板：宿主随后会 selectPanel(null)，晚一步就分不清原来停在哪。
+            const panelAtChange = activePanelIdOf();
+            const mine = ++token;
+            window.clearTimeout(timer);
+            timer = window.setTimeout(() => {
+              if (mine !== token || activeMainSessionId() !== active) return;
+              if (panelAtChange !== null && panelAtChange !== WORKBENCH_KEY) return;
+              const panel = activePanelIdOf();
+              if (panel !== null && panel !== WORKBENCH_KEY) return;
+              void openSessionInWorkbench(active, { auto: true }).catch((error) =>
+                ctx.logger?.warn?.(`deck-studio: auto-open bound session failed: ${error?.message ?? error}`));
+            }, 260);
+          };
+          const dispose = store.subscribe(onChange);
+          onChange();
+          return () => {
+            window.clearTimeout(timer);
+            token += 1;
+            if (typeof dispose === "function") dispose();
+          };
+        }, "deck-studio: session → workbench");
+
+        // 工作台 iframe 就绪：把还没送出去的「打开某本 deck」补发一次。
+        ctx.effect(() => {
+          const onReady = (event) => {
+            if (event.data?.type !== "dsh-deck-studio:workbench-ready") return;
+            if (event.source !== (frameState.el?.contentWindow ?? null)) return;
+            flushPendingOpen();
+          };
+          window.addEventListener("message", onReady);
+          return () => window.removeEventListener("message", onReady);
+        }, "deck-studio: workbench ready bridge");
+
+        // 工作台确认收到「打开某本 deck」→ 才算送达，清掉 pending（没 ack 就继续重试）。
+        ctx.effect(() => {
+          const onAck = (event) => {
+            const data = event.data ?? {};
+            if (data.type !== "dsh-deck-studio:open-binding-ack") return;
+            if (event.source !== (frameState.el?.contentWindow ?? null)) return;
+            if (!pendingOpen || String(data.id ?? "") !== String(pendingOpen.id ?? "")) return;
+            const failed = data.ok === false;
+            pendingOpen = null;
+            if (failed) ctx.logger?.warn?.(`deck-studio: open binding failed: ${data.reason ?? "unknown"}`);
+          };
+          window.addEventListener("message", onAck);
+          return () => window.removeEventListener("message", onAck);
+        }, "deck-studio: open-binding ack bridge");
+
         // 唯一入口：侧栏面板行「Deckline」（与 plugins / schedules 等插件同一种形态，带图标）；
         // → 对话用工作台里的「← 回到对话」。
         if (hasRightbar) {
@@ -729,6 +1040,21 @@ div[data-sidebar-collapsed]{grid-template-columns:0px minmax(0px,1fr) 0px!import
                 ctx.slots.register({ name: "sidebar.panellist", id: WORKBENCH_KEY, order: 46, label: () => "Deckline" }, DeckGlyph)),
               "deck-studio: workbench sidebar entry",
             );
+            // 会话行「⋯」菜单：把当前会话绑定的 deck 在工作台里打开（未绑定给可见提示）。
+            // 该槽位是宿主可选契约，旧版本没有时只记一条警告，不能影响面板本身注册。
+            try {
+              ctx.effect(
+                () => ctx.slots.inject("sidebar.workspaces.session.menu.item", () =>
+                  ctx.slots.register({
+                    name: "sidebar.workspaces.session.menu.item",
+                    id: "dsh-plugin-deck-studio.open-binding",
+                    order: 150,
+                  }, OpenDecklineMenuItem)),
+                "deck-studio: session menu entry",
+              );
+            } catch (error) {
+              ctx.logger?.warn?.(`deck-studio: session menu slot unavailable: ${error?.message ?? error}`);
+            }
           }
           ctx.logger?.info?.("deck-studio client: workbench-only mode");
         } else {

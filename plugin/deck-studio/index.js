@@ -395,9 +395,38 @@ export function createService(config, logger, env = process.env) {
     // F-71：标出「来自注册表」——preset 工具实例靠它区分静态源，运行时删除的 deck 才能被移除。
     config.decks.push({ id: entry.id, label: entry.label || entry.id, sourceRoot: entry.sourceRoot, kind: entry.kind ?? "deck", designId: entry.designId ?? null, fromRegistry: true });
   }
+  /**
+   * 0.2.15：补挂「工作副本里有 manifest、但注册表里没有条目」的 deck（ghost deck）。
+   *
+   * 以前这类 deck 只在 status() 的兜底分支里露一个标题：没有 adapter → 源里已出好的整页图
+   * baseline、资源库、封面、9 份文档全部拿不到，工作台打开就是一屏「未出图」的空白页，
+   * 看起来像「资源都在就是没显示」。这里在 adapters 之前补挂：manifest 里的源还可读
+   * （script.md 在）就造一个只读 adapter；读不到的留给 status() 标「未挂载」。
+   */
+  function adoptManifestDecks() {
+    const adopted = [];
+    for (const deckId of workspace.listDeckIds()) {
+      if (config.decks.some((deck) => deck.id === deckId)) continue;
+      const manifest = workspace.manifest(deckId);
+      const root = String(manifest?.source?.root ?? "").trim();
+      if (!root || !existsSync(join(root, "script.md"))) continue;
+      const kind = manifest?.kind === "design-canvas" ? "design-canvas" : "deck";
+      config.decks.push({
+        id: deckId,
+        label: String(manifest?.title ?? "").trim() || deckId,
+        sourceRoot: root,
+        kind,
+        designId: manifest?.designId ?? null,
+        fromManifest: true,
+      });
+      adopted.push(deckId);
+    }
+    return adopted;
+  }
   // F-157 首次启动自举：新装 profile 打开 bootstrap 时，自动登记示例 deck / 拷资源库 / 导入预设风格，
   // 避免「装完四个页面全是空的」。可用 profile patch 里 bootstrap: false 关掉。
   // 示例 deck 必须在 adapters 之前登记；资源和 fashioned 风格放后面（依赖 adapters/workspace）。
+  const adoptedDeckIds = adoptManifestDecks();
   if (config.bootstrap === true) bootstrapSampleDeck();
   const adapters = config.decks.map((deck) => createLocalSourceAdapter(deck));
 
@@ -517,9 +546,12 @@ export function createService(config, logger, env = process.env) {
     const success = String(payload.success ?? "").trim();
     const scopeOut = String(payload.scopeOut ?? "").trim();
     if (!title) throw new Error("deck 标题不能为空");
+    // 0.2.18：开工方式。表单式（默认）要求先把受众 / 意图 / 页数定清楚；
+    // 探索式只要一个标题——主意还模糊时先建本 deck，简报随对话补充（对齐 html deck-studio 的 explore）。
+    const creationMode = payload.mode === "explore" ? "explore" : "form";
     // 空白画布（design 会话用）：0 页，等 Agent 把风格样张沉淀到 designs/<ABBR>/。
     const blank = Boolean(payload.blank);
-    const pageTitles = newDeckPageTitles(payload, blank);
+    const pageTitles = creationMode === "explore" ? ["待定 · 边聊边定"] : newDeckPageTitles(payload, blank);
     const pad = (n) => String(n).padStart(2, "0");
     const now = new Date();
     const id = `deck-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}-${Math.random().toString(36).slice(2, 6)}`;
@@ -553,13 +585,16 @@ export function createService(config, logger, env = process.env) {
       "confidential: client",
       "render: image",
       "deck-type: talk",
+      ...(creationMode === "explore" ? ["creation-mode: explore"] : []),
       `pages: ${pageTitles.length}`,
       "status: draft",
       "---",
       "",
       `# ${title}`,
       "",
-      "> 由「新建 Deck」创建：先补意图与资料，再改 script；未确认前不出图。",
+      creationMode === "explore"
+        ? "> 由「新建 Deck · 探索模式」创建：还没定简报，先和 Agent 把听众 / 想让人带走什么 / 场合聊清楚，再补 script；未确认前不出图。"
+        : "> 由「新建 Deck」创建：先补意图与资料，再改 script；未确认前不出图。",
       "",
       "## 故事线",
       "",
@@ -594,6 +629,7 @@ export function createService(config, logger, env = process.env) {
         scopeOut,
         created: now.toISOString(),
         owner: config.userName,
+        creationMode,
       }),
       "utf8",
     );
@@ -672,6 +708,8 @@ export function createService(config, logger, env = process.env) {
       style: { abbr: styleAbbr, description: styleDescription },
       kind: payload.kind ?? "deck",
       designId: payload.designId ?? null,
+      // 0.2.18：探索式建档在注册表里也留痕（重启后 UI 能显示「探索式」）。
+      creationMode,
     });
     writeFileSync(decksRegistryFile, `${JSON.stringify({ decks: entries }, null, 2)}\n`, "utf8");
 
@@ -700,7 +738,8 @@ export function createService(config, logger, env = process.env) {
         designId: payload.designId ?? null,
         style: { abbr: styleAbbr, description: styleDescription },
         pages: pageTitles.length,
-        note: `初始化：script ${pageTitles.length} 页 + 意图 / 风格 / 参考资料清单 / 文档骨架`,
+        creationMode,
+        note: `初始化：script ${pageTitles.length} 页 + 意图 / 风格 / 参考资料清单 / 文档骨架${creationMode === "explore" ? "（探索式：简报随对话补充）" : ""}`,
       },
     });
     return {
@@ -837,9 +876,16 @@ export function createService(config, logger, env = process.env) {
     return { designId: design.designId, added, design: designProjectView(design) };
   }
 
-  /** F-157：把仓库自带的示例 deck 登记成只读源（没有配置任何 decks 时）。 */
+  /**
+   * F-157：把仓库自带的示例 deck 登记成只读源。
+   *
+   * 0.2.15：判定从「`config.decks` 非空就跳过」改成「这份示例没被挂上才登记」。
+   * 旧口径会被「导入预设风格时自动建的 8 本风格画布」顶掉——装过风格的机器上示例 deck
+   * 永远不会再登记，而它的工作副本还在 `decks/<id>/deck.json`，于是变成 ghost deck：
+   * 列表里有 10 页标题，打开却一页图都没有。
+   */
   function bootstrapSampleDeck() {
-    if (config.decks.length > 0) return;
+    if (config.decks.some((deck) => deck.id === "sample-deckline-intro")) return;
     const sampleRoot = join(REPO_ROOT, "samples", "deckline-intro");
     if (!existsSync(join(sampleRoot, "script.md"))) return;
     config.decks.push({ id: "sample-deckline-intro", label: "Deckline 示例手册", sourceRoot: sampleRoot, kind: "deck", designId: null, fromBootstrap: true });
@@ -1874,6 +1920,29 @@ export function createService(config, logger, env = process.env) {
     };
   }
 
+  /**
+   * 0.2.16：这本 deck 该用哪个目录当「会话工作区」。
+   *
+   * 背景：桌面宿主的 shell cwd 是 profile 目录（被工作区守卫挡掉），宿主客户端的
+   * workspaces 服务又没有 initializeDefault，源目录也常常还没登记成工作区——三者叠加，
+   * 「＋ 新建会话」永远解析不到工作区，于是**从没有会话的 deck 永远建不出会话**（点了没反应）。
+   * 这里给宿主桥一个明确的落点：deck 自己的项目目录优先；源落在插件安装位（node_modules）
+   * 或 App 包里时不拿来当工作区，退回这本 deck 的工作副本目录 <dataRoot>/decks/<id>。
+   */
+  function sessionWorkspacePathOf(deckId) {
+    const sourceRoot = String(adapterOf(deckId)?.sourceRoot ?? "").trim();
+    const installed = /[/\\]node_modules[/\\]/.test(sourceRoot) || sourceRoot.startsWith("/Applications/");
+    if (sourceRoot && !installed) return sourceRoot;
+    try {
+      const dir = workspace.deckDir(deckId);
+      // 工作区必须指向真实存在的目录；工作副本还没建出来时先建空的（没有 deck.json，不会被当成 deck 列出）。
+      mkdirSync(dir, { recursive: true });
+      return dir;
+    } catch {
+      return "";
+    }
+  }
+
   /** media 路由解析：只放行白名单目录的图片。 */
   function mediaFile(deckId, scope, path) {
     const adapter = adapterOf(deckId);
@@ -1951,8 +2020,11 @@ export function createService(config, logger, env = process.env) {
     }
     for (const deckId of workspace.listDeckIds()) {
       if (decks.some((deck) => deck.deckId === deckId)) continue;
+      // 0.2.15：走到这里说明这本 deck 的源没挂上（目录不在了 / script.md 丢了）。
+      // 明确标 unmounted + sourceAvailable:false，前端据此给「重新登记 / 换源」的入口，
+      // 而不是列一屏看起来正常、点开全是空白页的 deck。
       const manifest = workspace.manifest(deckId);
-      decks.push({ deckId, label: manifest?.title ?? deckId, sourceRoot: manifest?.source?.root ?? "", sourceAvailable: Boolean(manifest?.source?.root), title: manifest?.title ?? deckId, pageCount: manifest?.slides?.length ?? 0, status: manifest?.status ?? "", warnings: [] });
+      decks.push({ deckId, label: manifest?.title ?? deckId, sourceRoot: manifest?.source?.root ?? "", sourceAvailable: false, unmounted: true, title: manifest?.title ?? deckId, pageCount: manifest?.slides?.length ?? 0, status: manifest?.status ?? "", warnings: [] });
     }
     const tasks = store.taskList(200);
     const counts = {};
@@ -2276,10 +2348,12 @@ export function createService(config, logger, env = process.env) {
         // 当前 deck 生效的出图节点/模型（下拉可换）
         renderNodes: renderState(activeId),
         // 首页/标签用：deck 列表、风格（designs/<ABBR>/ 样张）、资源库
-        decks: decks.map((item) => ({ deckId: item.deckId, label: item.label, pageCount: item.pageCount, status: item.status ?? "", sourceRoot: item.sourceRoot ?? "", kind: item.kind ?? "deck" })),
+        decks: decks.map((item) => ({ deckId: item.deckId, label: item.label, pageCount: item.pageCount, status: item.status ?? "", sourceRoot: item.sourceRoot ?? "", kind: item.kind ?? "deck", sourceAvailable: item.sourceAvailable !== false, unmounted: item.unmounted === true })),
         designs: designSamples(activeId),
         ...homeCatalog(activeId),
         sourceRoot: adapter?.sourceRoot ?? deck?.source?.root ?? "",
+        // 0.2.16：给宿主桥注册 DSH 工作区用的项目目录（见 sessionWorkspacePathOf）。
+        sessionWorkspacePath: sessionWorkspacePathOf(activeId),
         // P0：黄条与 Inspector 用的数据目录状态（active 级别）
         dataDir: activeDataDir,
         dataDirMismatch: needsBanner,

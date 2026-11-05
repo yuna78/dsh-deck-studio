@@ -177,6 +177,11 @@
       <button class="modal-close" id="ndClose" title="关闭">✕</button>
     </div>
     <form class="modal-body newdeck-body" id="newDeckForm">
+      <div class="nd-mode" id="ndMode" role="radiogroup" aria-label="开工方式">
+        <label class="nd-mode-opt"><input type="radio" name="ndMode" value="form" checked><span><b>表单模式</b><em>受众 / 意图 / 页数先定清楚</em></span></label>
+        <label class="nd-mode-opt"><input type="radio" name="ndMode" value="explore"><span><b>探索模式</b><em>只有一句模糊想法也能开工，边聊边定</em></span></label>
+      </div>
+      <p class="engine-note nd-mode-note" id="ndModeNote" hidden>探索模式只留「标题 + 风格」：其余字段先隐藏。建完 Agent 会在对话里一次问清听众 / 想让人带走什么 / 场合 / 材料 / 边界，再给你一版故事线草案——问清之前不出图、不留 TODO。</p>
       <p class="nd-tip">先定「讲给谁、讲什么、想带走什么」+ 视觉风格。创建后会开出源目录与 9 份文档骨架，然后在对话里继续补资料、改 script，直到可以出图。<br>新项目保存位置：<code id="ndStoragePath">正在读取配置…</code>。<span id="ndStorageNote"></span></p>
       <label class="field"><span>主题 / 标题</span><input id="ndTitle" required placeholder="例：XX 业务场景的 AI 落地分享"></label>
       <label class="field"><span>项目目录名（可选，英文小写中划线；留空自动生成）</span><input id="ndDirName" placeholder="例：talk-ai-transformation-6-stages"></label>
@@ -599,6 +604,59 @@ const DESKTOP_HOST = !/^(https?:)$/.test(location.protocol)
 
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const getEl = (id) => document.getElementById(id);
+
+/* 0.2.21：宿主「点左侧会话 → 打开这本 deck」的指令常常比本脚本启动还早（面板刚挂载就开始发），
+   旧实现把监听注册在 boot 末尾，消息就直接丢了——表现成「工作区弹出来了，但停在首页」。
+   这里一启动就注册监听：没 boot 完先暂存，boot 完再执行，并回 ack 让宿主确认送达。 */
+const OPEN_BINDING = { pending: null, booted: false };
+
+function ackOpenBinding(data, result) {
+  try {
+    window.parent?.postMessage({ type: "dsh-deck-studio:open-binding-ack", id: data?.id ?? "", kind: data?.kind ?? "", ...result }, "*");
+  } catch {
+    /* 独立打开（无宿主）时忽略 */
+  }
+}
+
+function applyOpenBinding(data) {
+  if (!data || typeof data !== "object") return;
+  if (data.notice) {
+    flash(data.notice);
+    ackOpenBinding(data, { ok: true, action: "notice" });
+    return;
+  }
+  if (!data.id) return;
+  if (data.kind === "design") {
+    const project = (STATE.data?.designProjects || []).find((item) => item.designId === data.id);
+    const canvasId = project?.canvasDeckId || "";
+    if (!canvasId) {
+      flash(`找不到这个风格的画布：${data.id}`, "error");
+      ackOpenBinding(data, { ok: false, reason: "design canvas not found" });
+      return;
+    }
+    showDeck(canvasId)
+      .then(() => ackOpenBinding(data, { ok: true, deckId: canvasId }))
+      .catch((error) => {
+        flash(`打开风格画布失败：${error?.message ?? error}`, "error");
+        ackOpenBinding(data, { ok: false, reason: String(error?.message ?? error) });
+      });
+    return;
+  }
+  showDeck(data.id)
+    .then(() => ackOpenBinding(data, { ok: true, deckId: data.id }))
+    .catch((error) => {
+      flash(`打开 deck 失败：${error?.message ?? error}`, "error");
+      ackOpenBinding(data, { ok: false, reason: String(error?.message ?? error) });
+    });
+}
+
+window.addEventListener("message", (event) => {
+  if (event.source !== window.parent) return;
+  const data = event.data ?? {};
+  if (data.type !== "dsh-deck-studio:open-binding") return;
+  if (OPEN_BINDING.booted) applyOpenBinding(data);
+  else OPEN_BINDING.pending = data;
+});
 const fmtBytes = (n) => (n ? (n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.round(n / 1024) + " KB") : "");
 const fmtTime = (iso) => String(iso ?? "").replace("T", " ").replace(/\.\d+Z$/, "Z").replace("Z", "").slice(5);
 
@@ -1648,8 +1706,8 @@ function renderHomeDecks(decks, active, gov) {
         ${deck.deletable ? `<button type="button" class="design-tool danger deck-tool" data-deck-delete="${esc(deck.deckId)}" title="删除这个 deck（本机新建的才可以）">${TRASH_ICON}</button>` : ""}
         <div class="home-block-media">${homeThumb(deck)}</div>
         <div class="home-block-body">
-          <div class="home-block-title">${esc(homeDeckTitle(deck))}${deck.kind === "design-canvas" ? `<span class="pill canvas-pill">风格画布</span>` : ""}</div>
-          <div class="home-block-meta">${deck.kind === "design-canvas" ? "风格画布" : `${esc(String(deck.pageCount ?? 0))} 页`}${score != null ? ` · 治理 ${score}/100` : ""}</div>
+          <div class="home-block-title">${esc(homeDeckTitle(deck))}${deck.kind === "design-canvas" ? `<span class="pill canvas-pill">风格画布</span>` : ""}${deck.unmounted ? `<span class="pill canvas-pill" title="这份 deck 的源目录不在了（只剩工作副本）：点开在右侧 Inspector 换源 / 重新登记">源未挂载</span>` : ""}</div>
+          <div class="home-block-meta">${deck.unmounted ? "源未挂载 · 只剩工作副本" : deck.kind === "design-canvas" ? "风格画布" : `${esc(String(deck.pageCount ?? 0))} 页`}${score != null ? ` · 治理 ${score}/100` : ""}</div>
           ${styleChip || docTags || rulesChip ? `<div class="home-block-tags">${styleChip}${rulesChip}${docTags}</div>` : ""}
         </div>
       </div>`;
@@ -4657,6 +4715,41 @@ function newDeckStorageInfo(config = {}) {
   return { path: "暂时无法确定", note: "请等待工作台配置加载后重试；未配置 projectsRoot 时使用 <dataRoot>/projects/<deck-id>/source/。" };
 }
 
+/** 0.2.18：探索模式要藏起来的表单字段（标题 / 风格 / 参考资料之外的「先填清楚」项）。 */
+const ND_FORM_ONLY = ["ndDirName", "ndPages", "ndDensity", "ndAudience", "ndTopic", "ndIntent", "ndOccasion", "ndSuccess", "ndScopeOut", "ndRefs"];
+
+/** 当前开工方式：form（表单）/ explore（探索，主意还没定清楚）。 */
+function newDeckMode() {
+  return document.querySelector('#ndMode input[name="ndMode"]:checked')?.value === "explore" ? "explore" : "form";
+}
+
+/**
+ * 切换开工方式：探索式只留「标题 + 风格」，其余字段隐藏（值保留，切回表单还在）；
+ * 隐藏的字段不能用 hidden 属性就完事——.newdeck-body .field 是 display:flex，会盖掉浏览器默认样式。
+ */
+function applyNewDeckMode() {
+  const explore = newDeckMode() === "explore";
+  for (const id of ND_FORM_ONLY) {
+    const field = getEl(id)?.closest(".field");
+    if (!field) continue;
+    field.hidden = explore;
+    field.style.display = explore ? "none" : "";
+  }
+  // 成对的行（场合 / 成功标准）两个字段都藏起来后，行本身也要收掉，否则会留一条空栅格。
+  document.querySelectorAll("#newDeckForm .nd-row").forEach((row) => {
+    const allHidden = [...row.querySelectorAll(".field")].every((field) => field.hidden);
+    row.hidden = explore && allHidden;
+    row.style.display = explore && allHidden ? "none" : "";
+  });
+  const pages = getEl("ndPages");
+  if (pages) pages.required = !explore;
+  getEl("ndModeNote").hidden = !explore;
+  const button = getEl("ndCreate");
+  if (button) button.textContent = explore ? "开始探索 →" : "创建并开始对话";
+  getEl("newDeckModal").dataset.mode = explore ? "explore" : "form";
+  return explore;
+}
+
 function openNewDeckModal() {
   // F-112：profile 里配了 defaultStyleAbbr 就默认预选这个风格（用户仍可改/取消）。
   STATE.ndStyleAbbr = String(STATE.data?.config?.defaultStyleAbbr || "");
@@ -4666,6 +4759,7 @@ function openNewDeckModal() {
   getEl("ndStoragePath").textContent = storage.path;
   getEl("ndStorageNote").textContent = storage.note;
   getEl("newDeckModal").hidden = false;
+  applyNewDeckMode();
   renderDeckStyleChoices();
   setTimeout(() => getEl("ndTitle").focus(), 30);
 }
@@ -4678,26 +4772,33 @@ getEl("newDeckBtn").addEventListener("click", openNewDeckModal);
 getEl("ndClose").addEventListener("click", closeNewDeckModal);
 getEl("ndCancel").addEventListener("click", closeNewDeckModal);
 getEl("newDeckModal").addEventListener("click", (event) => { if (event.target === getEl("newDeckModal")) closeNewDeckModal(); });
+getEl("ndMode").addEventListener("change", applyNewDeckMode);
 getEl("newDeckForm").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const payload = {
-    title: getEl("ndTitle").value.trim(),
-    dirName: getEl("ndDirName").value.trim(),
-    pages: Math.min(Math.max(Number.parseInt(getEl("ndPages").value, 10) || 6, 1), 40),
-    contentDensity: getEl("ndDensity").value || "auto",
-    audience: getEl("ndAudience").value.trim(),
-    topic: getEl("ndTopic").value.trim(),
-    intent: getEl("ndIntent").value.trim(),
-    occasion: getEl("ndOccasion").value.trim(),
-    success: getEl("ndSuccess").value.trim(),
-    scopeOut: getEl("ndScopeOut").value.trim(),
-    references: getEl("ndRefs").value.trim(),
-    style: {
-      abbr: STATE.ndStyleAbbr || "",
-      // preset 选中的话，description 仍带完整风格定义（只是不给用户看）
-      description: pickedDeckStyle()?.description || getEl("ndStyle").value.trim(),
-    },
+  const explore = newDeckMode() === "explore";
+  const style = {
+    abbr: STATE.ndStyleAbbr || "",
+    // preset 选中的话，description 仍带完整风格定义（只是不给用户看）
+    description: pickedDeckStyle()?.description || getEl("ndStyle").value.trim(),
   };
+  // 0.2.18：探索式只提交「标题 + 风格」——被隐藏字段里可能还留着旧值，不能偷偷带上；
+  // 页数先占 1 页占位，等对话里把故事线聊清楚再追加。
+  const payload = explore
+    ? { title: getEl("ndTitle").value.trim(), mode: "explore", pages: 1, style }
+    : {
+        title: getEl("ndTitle").value.trim(),
+        dirName: getEl("ndDirName").value.trim(),
+        pages: Math.min(Math.max(Number.parseInt(getEl("ndPages").value, 10) || 6, 1), 40),
+        contentDensity: getEl("ndDensity").value || "auto",
+        audience: getEl("ndAudience").value.trim(),
+        topic: getEl("ndTopic").value.trim(),
+        intent: getEl("ndIntent").value.trim(),
+        occasion: getEl("ndOccasion").value.trim(),
+        success: getEl("ndSuccess").value.trim(),
+        scopeOut: getEl("ndScopeOut").value.trim(),
+        references: getEl("ndRefs").value.trim(),
+        style,
+      };
   if (!payload.title) return;
   getEl("ndCreate").disabled = true;
   getEl("ndState").textContent = "正在创建 deck 项目（源目录 + 9 份文档骨架）…";
@@ -4716,6 +4817,18 @@ getEl("newDeckForm").addEventListener("submit", async (event) => {
     // 停在 home（loadWorkbench 在 home 视图下只会重渲染首页，用户会以为「没自动打开」）。
     await showDeck(deckId);
     getEl("renderStatus").textContent = `已创建 ${label}；对话在 DSH 原生 Chat 里继续。`;
+    if (explore) {
+      sendPrompt(
+        `我刚新建了 deck「${label}」（${deckId}），用的是**探索模式**：我一开始只有个模糊想法，没有现成简报。\n` +
+        `请按这个顺序把我带清楚，不要留 TODO、不要出图：\n` +
+        `1) 先一次问完 3–5 个关键问题（讲给谁 / 听完要带走什么 / 什么场合和时长 / 手上有没有现成材料 / 有没有必须避开的边界），别一条一条挤牙膏；\n` +
+        `2) 我回答后，用 deck_doc_update（docId=intent）把听众 / 带走 / 场合 / 成功标准 / 不讲的写回去；没依据的字段写成「待确认：缺依据，已列问题」，不要编，也不要留模板占位；\n` +
+        `3) 再给一版故事线草案：分几段、每段回答什么、大概几页（不确定就给区间），等我确认；\n` +
+        `4) 我确认后再用 deck_script_add_page / 提案改 script；要出图我会明确说。\n` +
+        `材料里没有的数字 / 客户 / 案例 / URL 不要编。`,
+        "探索式新建 · 首条消息发给 Agent",
+      );
+    } else {
     sendPrompt(
       `我刚新建了 deck「${label}」（${deckId}）。\n` +
       `页数：已按 ${payload.pages} 页占位（P01–P${String(payload.pages).padStart(2, "0")}）；页数要改就在对话里说，用 deck_script_add_page 追加。\n` +
@@ -4737,6 +4850,7 @@ getEl("newDeckForm").addEventListener("submit", async (event) => {
       `材料里没有的数字 / 客户 / 案例 / URL 不要编。做完复述你补了什么、还缺什么，再等我确认后起 script 草案，不要直接出图。`,
       "新建 deck · 下一步发给 Agent",
     );
+    }
   } catch (error) {
     getEl("ndState").textContent = "创建失败：" + error.message;
   } finally {
@@ -5107,6 +5221,8 @@ function requestConversation(payload) {
       cwd: STATE.data?.cwd || "",
       workspacePath: STATE.data?.workspacePath || "",
       sourceRoot: STATE.data?.active?.sourceRoot || "",
+      // 0.2.16：宿主要按「deck 自己的项目目录」建会话工作区（桌面里 cwd 是 profile 目录，用不了）。
+      sessionWorkspacePath: STATE.data?.active?.sessionWorkspacePath || "",
       ...payload,
       // F-202B：桌面 Dock 模式默认不抢主区（open:false）；显式 takeMain → open:true 切宿主主区。
       // web 不传 open（undefined → 宿主按原语义 openSession）。
@@ -5184,8 +5300,11 @@ async function ensureDeckConversation(deckId) {
   });
   if (!result.ok) {
     getEl("chatBindChip").textContent = `会话打开失败：${result.reason || "未知原因"}`;
+    flash(`会话打开失败：${result.reason || "未知原因"}`, "error");
     return result;
   }
+  // 0.2.20：会话建好了但首条指令没发出去时，宿主会带 notice——别让它悄悄消失。
+  if (result.notice) flash(result.notice);
   if (!binding || binding.sessionId !== result.sessionId) {
     await bindConversation({ sessionId: result.sessionId, kind: "deck", id: deckId, title: label });
   }
@@ -5591,23 +5710,33 @@ function renderChatHeader() {
 /** ＋ 新建会话：建完立即绑定当前 deck / design（不再产生未绑定会话）。 */
 async function newChatForTarget() {
   const target = activeChatTarget();
-  if (!target) return;
+  if (!target) {
+    // 0.2.16：以前这里静默 return——点了 ＋ 什么都不发生，用户只能猜。
+    flash("当前没有可绑定的 deck / 风格：先打开一本 deck 再新建会话", "error");
+    return;
+  }
   const button = getEl("newChatBtn");
   button.disabled = true;
   try {
     const result = await requestConversation({ action: "ensure", kind: target.kind, id: target.id, title: target.label });
     if (!result.ok || !result.sessionId) {
+      const reason = result.reason || "未知原因";
       // F-202B：失败要用户可见——之前只写按钮 title，Dock 模式下看起来像「点了没反应」。
+      // 0.2.16：再加一条常驻 toast，光靠 chip 文案还是容易被当成没反应。
+      flash(`新建会话失败：${reason}`, "error");
       getEl("chatBindChip").textContent = "会话新建失败";
-      getEl("chatBindChip").title = `新建会话失败：${result.reason || "未知原因"}；点这里重试`;
-      getEl("chatSessionBtn").title = `新建会话失败：${result.reason || "未知原因"}`;
+      getEl("chatBindChip").title = `新建会话失败：${reason}；点这里重试`;
+      getEl("chatSessionBtn").title = `新建会话失败：${reason}`;
       return;
     }
     STATE.chatSessionId = result.sessionId;
+    if (result.notice) flash(result.notice);
     await bindConversation({ sessionId: result.sessionId, kind: target.kind, id: target.id, title: target.label });
     await refreshSessions();
     renderChatHeader();
     // 桌面：新建就是要点开聊——切到宿主主区的原生会话。
+  } catch (error) {
+    flash(`新建会话失败：${error?.message ?? error}`, "error");
   } finally {
     button.disabled = false;
   }
@@ -5900,6 +6029,22 @@ function backToManual(box) {
     showHome();
   }
   setInterval(() => loadWorkbench(STATE.deckId), 5000);
+
+  /**
+   * 0.2.21：boot 完成 → 把启动期间暂存的「打开某本 deck」执行掉，再向宿主报 ready。
+   * 顺序很关键：先 booted=true 再执行，避免执行期间又来一条指令被丢进 pending 里没人取。
+   */
+  OPEN_BINDING.booted = true;
+  if (OPEN_BINDING.pending) {
+    const pending = OPEN_BINDING.pending;
+    OPEN_BINDING.pending = null;
+    applyOpenBinding(pending);
+  }
+  try {
+    window.parent?.postMessage({ type: "dsh-deck-studio:workbench-ready" }, "*");
+  } catch {
+    /* 直接打开（无宿主）时没有 parent */
+  }
 })();
 </script>
 </body>

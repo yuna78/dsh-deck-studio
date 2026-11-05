@@ -371,6 +371,19 @@ body.resizing{user-select:none;cursor:col-resize}
 .newdeck-body .nd-row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .newdeck-body .field > span{font-size:10.5px;color:#5c6464}
 .newdeck-body input,.newdeck-body textarea,.newdeck-body select{width:100%;font:inherit;font-size:12px;padding:7px 9px;border:1px solid var(--line);border-radius:5px;background:#fffdf8;color:var(--ink);resize:vertical}
+/* 0.2.18 / 0.2.19：表单 / 探索两种开工方式。
+   必须写成 .newdeck-body .nd-mode-opt 这种权重，并且放在上面那条基础 input 规则之后——
+   否则 radio 会被 `.newdeck-body input{width:100%;padding:7px 9px}` 接管：撑满整行、把文字挤成一字一行
+   （0.2.18 的排版事故就是同权重 + 顺序靠前导致的）。 */
+.newdeck-body .nd-mode{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:0 0 10px}
+.newdeck-body .nd-mode-opt{display:flex;align-items:flex-start;gap:8px;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:#fffdf8;cursor:pointer;font-size:12px;color:var(--ink);min-width:0}
+.newdeck-body .nd-mode-opt input[type="radio"]{width:auto;height:auto;flex:0 0 auto;margin:2px 0 0;padding:0;border:0;background:none;accent-color:#0c4651}
+.newdeck-body .nd-mode-opt > span{flex:1 1 auto;display:flex;flex-direction:column;gap:2px;min-width:0}
+.newdeck-body .nd-mode-opt b{font-weight:600;font-size:12px;line-height:1.35}
+.newdeck-body .nd-mode-opt em{font-style:normal;font-size:11px;line-height:1.45;color:#728086;overflow-wrap:anywhere}
+.newdeck-body .nd-mode-opt:has(input:checked){border-color:#0c4651;box-shadow:inset 0 0 0 1px #0c4651}
+.newdeck-body .nd-mode-opt:has(input:checked) em{color:#48605f}
+.newdeck-body .nd-mode-note{margin:0 0 10px}
 /* 新建 Deck · 风格选择：样张预览卡片（F-45） */
 .nd-styles{display:grid;grid-template-columns:repeat(auto-fill,minmax(158px,1fr));gap:8px;margin-bottom:8px}
 .nd-style{display:flex;flex-direction:column;padding:0;border:1px solid var(--line);border-radius:8px;background:#fffdf8;cursor:pointer;font:inherit;text-align:left;overflow:hidden;transition:border-color .12s,box-shadow .12s}
@@ -677,7 +690,10 @@ body.has-chat .layout{grid-template-columns:var(--nav-w,430px) 5px minmax(0,1fr)
 body.presenting{overflow:hidden}
 .present-stage{width:100%;height:100%;display:flex;align-items:center;justify-content:center;padding:22px 22px 82px;cursor:pointer}
 .present-slide{margin:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center}
-.present-slide img{max-width:100%;max-height:100%;object-fit:contain;border-radius:3px;background:#000;box-shadow:0 24px 80px #000c;user-select:none;-webkit-user-drag:none}
+/* 0.2.24：放映时整页图必须随屏幕放大——以前只写 max-width/max-height，图小于画布时永远保持
+   自然尺寸（1280×720 的页图在 2K/4K 屏上就缩在中间一小块）。改成 width/height:100% + object-fit:contain，
+   大图缩小、小图放大都按比例铺满；阴影改用 drop-shadow，跟着图片轮廓而不是整块元素。 */
+.present-slide img{width:100%;height:100%;max-width:none;max-height:none;object-fit:contain;border-radius:0;background:transparent;filter:drop-shadow(0 22px 62px #000b);user-select:none;-webkit-user-drag:none}
 .present-empty{width:min(900px,82vw);aspect-ratio:16/9;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;border:1px dashed #ffffff2e;border-radius:8px;color:#c9c2b4;font-size:13px;text-align:center;padding:24px}
 .present-empty b{font-size:20px;color:#f3ede1}
 .present-bar{position:absolute;left:50%;bottom:18px;transform:translateX(-50%);display:flex;align-items:center;gap:10px;padding:6px 10px 6px 6px;border-radius:999px;background:#0c4651d9;border:1px solid #ffffff24;box-shadow:0 12px 34px #0009;font-size:12px;color:#e9e4d8;max-width:calc(100% - 28px);backdrop-filter:blur(8px)}
