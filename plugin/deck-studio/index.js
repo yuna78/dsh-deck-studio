@@ -2458,7 +2458,12 @@ export function createService(config, logger, env = process.env) {
       appendixCount: adapterOf(deck.deckId)?.available() ? adapterOf(deck.deckId).overview().appendixCount ?? 0 : workspace.manifest(deck.deckId)?.appendix?.count ?? 0,
       appendixRows: workspace.manifest(deck.deckId)?.appendix?.rows ?? [],
     }));
-    const activeId = (requestedDeckId && decks.some((deck) => deck.deckId === requestedDeckId) ? requestedDeckId : null) ?? decks[0]?.deckId ?? workspace.listDeckIds()[0] ?? null;
+    // F-205：显式点名要打开某本 deck、但这次快照里还没有它（刚导入 / 刚创建，列表还没跟上）时，
+    // 不要静默退回第一本——前端拿到 requestedMissing 会立刻重试，避免「导入成功却打开别的 deck」。
+    const requestedMissing = Boolean(requestedDeckId) && !decks.some((deck) => deck.deckId === requestedDeckId);
+    const activeId = requestedMissing
+      ? decks[0]?.deckId ?? workspace.listDeckIds()[0] ?? null
+      : requestedDeckId ?? decks[0]?.deckId ?? workspace.listDeckIds()[0] ?? null;
     // P0：进 deck 时先体检（规格 §2「进入某本 deck 时，每次，读 manifest 之前」）。
     // mismatch / partial 时不 ensureDeck：那会凭空建出空的 decks/<id>/，旧图也找不回（禁止项）。
     const dataDirInfo = dataDirStateOf({ config, store, workspace, adapters, env }, activeId);
@@ -2575,6 +2580,9 @@ export function createService(config, logger, env = process.env) {
       renderSettings: renderSettings(),
       decks,
       active,
+      // F-205：这次请求点名的 deck 是否存在（true = 列表还没跟上，前端重试即可）。
+      requestedDeckId: requestedDeckId ?? null,
+      requestedMissing,
       designProjects: designProjects(),
       bindings: listBindings(),
       proposals: base.pendingProposals,

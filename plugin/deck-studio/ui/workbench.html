@@ -830,9 +830,15 @@ function mdToHtml(markdown, options = {}) {
 }
 
 /* ---------------- 数据加载 ---------------- */
+/* F-205：并发保护。导入 / 切 deck 会连着打好几次 workbench 接口，先发的旧请求如果后回来，
+ * 会把刚切到的新 deck 覆盖成旧数据（表现：导入成功却停在上一个 / 第一个 deck）。
+ * 只让**最后发起**的那次结果落地。 */
+let LOAD_SEQ = 0;
 async function loadWorkbench(deckId = null) {
+  const seq = ++LOAD_SEQ;
   try {
     const next = await route("workbench", deckId ? { deckId } : undefined);
+    if (seq !== LOAD_SEQ) return;
     const active = next.active || {};
     const signature = JSON.stringify([
       active.deckId,
@@ -865,6 +871,7 @@ async function loadWorkbench(deckId = null) {
       }
     }
   } catch (error) {
+    if (seq !== LOAD_SEQ) return;
     STATE.demo = true;
     STATE.data = demoData();
     renderChrome();
@@ -5119,6 +5126,32 @@ getEl("impList").addEventListener("click", (event) => {
     renderImportPicker();
   }
 });
+/**
+ * F-205：导入成功后必须停在**刚导入的这本** deck。
+ *
+ * 导入要跑 pdftoppm（几秒到几十秒），期间 5s 轮询、宿主指令、刚创建 deck 的列表延迟都可能
+ * 把视图切到别的 deck（典型：工作台列表还没收录新 deck 时接口退回第一本）。
+ * 这里在成功后的 ~3 秒里以新 deck 为准核对几次；用户自己点了/按了键就立刻停手，不抢手动导航。
+ */
+async function openImportedDeck(deckId) {
+  let userTookOver = false;
+  const flag = () => { userTookOver = true; };
+  window.addEventListener("pointerdown", flag, true);
+  window.addEventListener("keydown", flag, true);
+  try {
+    await showDeck(deckId);
+    for (const gap of [500, 900, 1500]) {
+      await new Promise((resolve) => setTimeout(resolve, gap));
+      if (userTookOver) return;
+      if (STATE.view === "deck" && STATE.deckId === deckId) continue;
+      await showDeck(deckId);
+    }
+  } finally {
+    window.removeEventListener("pointerdown", flag, true);
+    window.removeEventListener("keydown", flag, true);
+  }
+}
+
 getEl("impSubmit").addEventListener("click", async () => {
   if (!IMP.selected || IMP.busy) return;
   IMP.busy = true;
@@ -5143,7 +5176,8 @@ getEl("impSubmit").addEventListener("click", async () => {
     getEl("impState").textContent = parts.join(" · ");
     closeImportPdfModal();
     flash(`已导入「${result.deck?.label || ""}」：${result.pages} 页整页图`, "ok");
-    if (result.deck?.deckId) await showDeck(result.deck.deckId);
+    // F-205：导入成功后以新 deck 为准（详见 openImportedDeck）。
+    if (result.deck?.deckId) await openImportedDeck(result.deck.deckId);
   } catch (error) {
     getEl("impState").textContent = "导入失败：" + importErrText(error?.code, error?.message);
   } finally {
@@ -6322,7 +6356,11 @@ function backToManual(box) {
     STATE.homeSection = match ? match[1] : "decks";
     showHome();
   }
-  setInterval(() => loadWorkbench(STATE.deckId), 5000);
+  // F-205：导入（pdftoppm 可能要几十秒）期间别用旧 deckId 轮询，否则回来晚的那次会把新 deck 顶掉。
+  setInterval(() => {
+    if (IMP.busy) return;
+    loadWorkbench(STATE.deckId);
+  }, 5000);
 
   /**
    * 0.2.21：boot 完成 → 把启动期间暂存的「打开某本 deck」执行掉，再向宿主报 ready。

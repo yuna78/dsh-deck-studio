@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.2.26] · 2026-11-06
+
+> 导入 PDF 成功之后，工作台进入的是**列表里第一本 deck**，不是刚导入的那本。
+
+### 修复
+
+- **导入后停在刚导入的 deck**（F-205）。导入要跑 `pdftoppm`（几秒到几十秒），这段时间里工作台
+  5 s 轮询、宿主下发的打开指令、以及「新建 deck 还没进列表」都会改写「当前是哪本 deck」：
+  - 工作台 `loadWorkbench` 增加并发序号，只让**最后发起**的那次结果落地——先发后回的旧请求
+    不再把刚切过去的新 deck 覆盖回旧数据；
+  - 导入成功不再直接切视图，改为 `openImportedDeck()`：打开后约 3 秒内以新 deck 为准核对几次，
+    **用户一按鼠标 / 键盘就立刻停手**，不抢手动导航；
+  - 导入进行中（`IMP.busy`）跳过 5 s 轮询；
+  - `workbench(deckId)` 点名的 deck 暂时不在这次快照里时，返回 `requestedDeckId / requestedMissing`
+    而不是静默退回 `decks[0]`（正是「打开第一本」的来源），工作台据此立刻重试。
+
+### 验证
+
+- `verify/smoke.mjs` 120/120（新增 2 条：`requestedMissing` 语义、工作台并发 / 导入核对守卫的静态检查），
+  `scripts/harness-check.mjs` 9 项 0 失败。
+- 真机路径复核（0.2.2-rc.1 隔离实例 + Playwright 驱动真实工作台页面）：`workbench?deckId=<不存在的 id>`
+  返回 `requestedMissing: true`；走 UI 导入一份 3 页 PDF 后，工作台最后一次 `workbench` 请求 = 新导入的 deck。
+
 ## [0.2.25] · 2026-11-06
 
 > desktop App 升级到 DSH 0.2.2-rc.1 后，新建 deck 会话直接报错：
