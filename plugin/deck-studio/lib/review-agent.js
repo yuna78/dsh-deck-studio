@@ -1,6 +1,7 @@
 /** Dedicated, preset-free, one-shot audience reviewer. No Cordis import is required. */
 import { randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
+import { presentNative } from "./present-native.js";
 
 export const REVIEW_AGENT_PROVIDER = "deck-studio-review";
 
@@ -122,7 +123,7 @@ export function registerReviewAgentProvider(ctx, dependencies = {}) {
           signal: controller.signal,
           setup(agentCtx, child) {
             agentCtx.systemPrompt.suppressRuntimeContext();
-            agentCtx.tools.presentAs("native");
+            presentNative(agentCtx.tools);
             agentCtx.tools.restrict({ allow: [] });
             agentCtx.tools.guard(() => "Internal reviewers cannot execute tools");
             agentCtx.systemPrompt.section({ name: "deck-studio:internal-review", order: 0,

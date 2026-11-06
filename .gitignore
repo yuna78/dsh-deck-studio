@@ -2,8 +2,3 @@
 dist/
 node_modules/
 *.log
-.dsh-dev/
-
-# prepack 构建产物（scripts/prepack-assets.mjs 生成，不进 git）
-plugin/deck-studio/seeds/docs/
-plugin/deck-studio/seeds/samples/deckline-intro/

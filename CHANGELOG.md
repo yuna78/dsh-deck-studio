@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.2.25] · 2026-11-06
+
+> desktop App 升级到 DSH 0.2.2-rc.1 后，新建 deck 会话直接报错：
+> `agent-preset/invalid: deck-capabilities ... ctx.tools.presentAs is not a function`。
+
+### 新增
+
+- **目录 PDF 导入**：工作台「⇪ 导入 PDF」把一份现有的 PDF 拆成逐页整页图（`pdftoppm`，默认 120 dpi /
+  ≤40 页），直接落成一本 image deck；同目录若有同名 `.md`（页数与 PDF 一致）会当作脚本源抽取，
+  没有就把其余 md 收进 materials，intent 末尾补「导入说明（推断 · 待确认）」。
+  路由 `POST /api/deck-studio.deck-import`（错误按 code：`pdftoppm-missing` / `no-pdf` / `not-found` /
+  `bad-dir` / `import-failed`）。PPTX 与「逐页看图推意图」留二期。
+
+### 修复
+
+- **兼容 DSH 0.2.2 移除 `ctx.tools.presentAs()`**：0.2.2 把原生工具执行改由基座
+  `dsh-tool-executor-native` 挂载，`presentAs` 这个 API 被删掉；插件在 preset 挂载阶段调用它会让
+  整个 `deck-capabilities` 预设校验失败——不只是新建会话报错，已有 deck 会话也恢复不了 agent
+  （对话列停在 `Session unavailable`）。新增 `lib/present-native.js`：`presentNative(tools)` 做
+  feature-detect，只有宿主提供 `presentAs` 才调用，0.2.1 / 0.2.2 两条线都能挂载；`lib/capabilities.js`
+  （子 agent 设置 + `apply`）与 `lib/review-agent.js`（审稿子 agent）统一改走它。
+- **回归用例**：`verify/capabilities.mjs` 增「0.2.2 宿主没有 presentAs 仍能挂载并跑 research」，
+  `verify/review-agent.mjs` 增「没有 presentAs 仍能跑审稿」。
+
+### 验证
+
+- `verify/capabilities.mjs` 13/13、`verify/review-agent.mjs` 14/14、`verify/smoke.mjs` 118/118、
+  `scripts/harness-check.mjs` 9 项 0 失败。
+- 真机对照（0.2.2-rc.1 内置 CLI + 隔离 `DSH_HOME`，未动桌面 App）：未修版
+  `session/create {agentPreset:"deck-studio"}` 复现同一条 `agent-preset/invalid`；修后返回 ok，
+  `session/list` 里该会话 `agentAvailable: true`（未修版为 `false`）。
+
 ## [0.2.24] · 2026-11-05
 
 > 全屏演示的整页图不放大：1280×720 的页面在大屏上缩在中间一小块，四周全是留白。

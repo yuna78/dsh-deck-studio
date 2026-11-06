@@ -9,7 +9,7 @@
  * @module dsh-plugin-deck-studio
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -37,6 +37,7 @@ import { resolveMediaFile, scanDesignStyles, scanResources } from "./lib/home-ca
 import { defaultSelection, renderModelPayload, resolveSelection } from "./lib/render-nodes.js";
 import { applyRenderSettings, readRenderSettings, renderSettingsPayload, saveRenderSettings } from "./lib/render-settings.js";
 import { buildPrompt, editEndpointFor, selectRenderer } from "./lib/render.js";
+import { PDF_IMPORT_MAX_PAGES, applyImportedTitles, buildImportNote, extractIntentFields, headingsAsTitles, listImportDir, normalizeDpi, rasterizePdfToPng, scriptPagesFromMarkdown, titleFromPdfName } from "./lib/pdf-import.js";
 import { readDeckBrief } from "./lib/deck-brief.js";
 import { detectProfileDir, installModeOf, isNewer, latestFromRegistry, repoLinksOf } from "./lib/update-check.js";
 
@@ -78,6 +79,8 @@ export const ROUTES = {
   media: "/api/deck-studio.media",
   renderModel: "/api/deck-studio.render-model",
   deckCreate: "/api/deck-studio.deck-create",
+  // PDF 导入：目录里的一份 PDF → 每页整页图的 deck（附带 md 抽取）
+  deckImport: "/api/deck-studio.deck-import",
   deckDensity: "/api/deck-studio.deck-density",
   renderSettings: "/api/deck-studio.render-settings",
   userSettings: "/api/deck-studio.user-settings",
@@ -751,6 +754,193 @@ export function createService(config, logger, env = process.env) {
       designId: payload.designId ?? null,
       contentDensity: normalizeContentDensity(payload.contentDensity),
     };
+  }
+
+  /**
+   * PDF 导入（需求 req_28a1eec6eab8）：导入目录里的 PDF → 每页一张整页图的 deck。
+   *
+   * 顺序：列目录（PDF / md）→ 栅格化（pdftoppm）→ createDeck（页数 = PDF 页数）→ 落 pages/p01.png…
+   * → md 抽取（script / intent / 其它 md 进 materials）→ 写导入说明 → 事件。
+   * - **只读**导入目录，产物全部落 createDeck 新建的目录；PDF 本身不复制。
+   * - 意图只抽 md 里已写好的字段，不推断；看图推意图是下一阶段。
+   * - `rasterize` 参数是测试缝（smoke 注入假栅格器，CI 不需要 poppler），产品路径用默认实现。
+   */
+  function importPdfDeck(payload = {}, { rasterize = rasterizePdfToPng } = {}) {
+    // 两种入口：直接给 PDF 绝对路径（工作台「点一份 PDF」走这条），或给目录 + 可选文件名（脚本 / API 用）。
+    const pdfPath = String(payload.pdf ?? "").trim();
+    let dir = String(payload.dir ?? "").trim();
+    let wanted = String(payload.file ?? "").trim();
+    if (pdfPath) {
+      if (!isAbsolute(pdfPath)) throw new Error(`PDF 要填绝对路径：${pdfPath}`);
+      if (!existsSync(pdfPath) || !statSync(pdfPath).isFile()) throw new Error(`PDF 不存在：${pdfPath}`);
+      if (!/\.pdf$/i.test(pdfPath)) throw new Error(`不是 PDF：${pdfPath}`);
+      dir = dirname(pdfPath);
+      wanted = basename(pdfPath);
+    }
+    if (!dir) throw new Error("请先选一份 PDF");
+    if (!isAbsolute(dir)) throw new Error(`导入目录要填绝对路径：${dir}`);
+    if (!existsSync(dir) || !statSync(dir).isDirectory()) throw new Error(`导入目录不存在：${dir}`);
+
+    const listing = listImportDir(dir);
+    if (!listing.pdfs.length) throw new Error("这个目录里没有 PDF（本轮只支持 PDF；PPTX 下一阶段再做）");
+    let pdf = listing.pdfs[0];
+    if (wanted) {
+      pdf = listing.pdfs.find((item) => item.name === wanted || item.path === wanted);
+      if (!pdf) throw new Error(`目录里没有这份 PDF：${wanted}`);
+    } else if (listing.pdfs.length > 1) {
+      throw new Error(`目录里有 ${listing.pdfs.length} 份 PDF，先指定要导入哪一份：${listing.pdfs.map((item) => item.name).join(" / ")}`);
+    }
+
+    const dpi = normalizeDpi(payload.dpi);
+    // 暂存区放在数据目录里（不是导入目录）：导入不该往别人的目录里写东西。
+    const staging = join(config.dataRoot, "imports", `staging-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`);
+    const raster = rasterize({ pdfPath: pdf.path, outDir: staging, dpi });
+    if (raster.pageCount > PDF_IMPORT_MAX_PAGES) {
+      rmSync(staging, { recursive: true, force: true });
+      throw new Error(`这份 PDF 有 ${raster.pageCount} 页，超过单次导入上限 ${PDF_IMPORT_MAX_PAGES} 页；先拆分再导入`);
+    }
+
+    try {
+      const mdTexts = listing.markdown.map((entry) => ({ ...entry, text: readFileSync(entry.path, "utf8") }));
+      const scriptEntry = mdTexts.find((entry) => /^script\.md$/i.test(entry.name));
+      const intentEntry = mdTexts.find((entry) => /^intent\.md$/i.test(entry.name));
+      const otherEntries = mdTexts.filter((entry) => entry !== scriptEntry && entry !== intentEntry);
+
+      // 意图字段：intent.md > script.md > 其它 md；只取第一个非空值，并记下来源。
+      const fields = {};
+      const fieldSources = {};
+      for (const entry of [intentEntry, scriptEntry, ...otherEntries]) {
+        if (!entry) continue;
+        const extracted = extractIntentFields(entry.text);
+        for (const [key, value] of Object.entries(extracted.fields)) {
+          if (fields[key]) continue;
+          fields[key] = value;
+          fieldSources[key] = `${entry.name} 的 ${extracted.sources[key] ?? "字段"}`;
+        }
+      }
+
+      const warnings = [];
+      const scriptRows = scriptEntry ? scriptPagesFromMarkdown(scriptEntry.text) : [];
+      const scriptMatches = scriptRows.length === raster.pageCount;
+      if (scriptEntry && !scriptMatches) {
+        warnings.push(`script.md 解析出 ${scriptRows.length} 页，和 PDF 的 ${raster.pageCount} 页对不上：已按 PDF 页数重建逐页骨架，请人工核对。`);
+      }
+      let titles = scriptMatches ? scriptRows.map((row) => String(row.title ?? "").trim()) : [];
+      if (!titles.length || titles.some((title) => !title)) {
+        const headingFallback = [intentEntry, scriptEntry, ...otherEntries]
+          .filter(Boolean)
+          .map((entry) => headingsAsTitles(entry.text, raster.pageCount))
+          .find((list) => list.length) ?? [];
+        if (headingFallback.length) titles = headingFallback;
+      }
+      titles = Array.from({ length: raster.pageCount }, (_, index) => titles[index] || `导入页 ${index + 1}`);
+
+      const title = String(payload.title ?? "").trim() || titleFromPdfName(pdf.name);
+      const deck = createDeck({
+        title,
+        dirName: payload.dirName,
+        pageTitles: titles,
+        audience: fields.audience,
+        topic: fields.topic,
+        intent: fields.intent,
+        occasion: fields.occasion,
+        success: fields.success,
+        scopeOut: fields.scopeOut,
+        contentDensity: payload.contentDensity,
+        kind: "deck",
+      });
+
+      // 1) 每页整页图：直接落 pages/p01.png…，sourceImages() 认的就是这套命名。
+      const pagesDir = join(deck.sourceRoot, "pages");
+      mkdirSync(pagesDir, { recursive: true });
+      for (const file of raster.files) copyFileSync(file.file, join(pagesDir, `${file.pageId}.png`));
+
+      // 2) md 抽取：script 页数对得上才当脚本源；intent.md 有就直接沿用原文。
+      const copiedScript = Boolean(scriptEntry && scriptMatches);
+      if (copiedScript) writeFileSync(join(deck.sourceRoot, "script.md"), scriptEntry.text, "utf8");
+      if (!copiedScript) {
+        // 没沿用 md 脚本时，把占位「**标题**：待定」换成导入推出来的标题，否则每页都显示「待定」。
+        const scriptFile = join(deck.sourceRoot, "script.md");
+        writeFileSync(scriptFile, applyImportedTitles(readFileSync(scriptFile, "utf8"), titles), "utf8");
+      }
+      if (intentEntry) writeFileSync(join(deck.sourceRoot, "intent.md"), intentEntry.text, "utf8");
+
+      // 3) 其余 md → materials/，并在支撑材料清单里登记（表头必须是 文件名/链接/总结，见 deck-templates）。
+      const materialsDir = join(deck.sourceRoot, "materials");
+      const materialRows = [];
+      for (const entry of otherEntries) {
+        mkdirSync(materialsDir, { recursive: true });
+        copyFileSync(entry.path, join(materialsDir, entry.name));
+        const sizeKb = Math.max(1, Math.round(entry.sizeBytes / 1024));
+        materialRows.push({ ref: `materials/${entry.name}`, type: "文件", status: "已找到", note: `${sizeKb} KB · 随 PDF 一起导入，待 Agent 抽事实` });
+      }
+      const materialsFile = join(workspace.deckDir(deck.deckId), "docs", "materials.md");
+      mkdirSync(dirname(materialsFile), { recursive: true });
+      writeFileSync(
+        materialsFile,
+        buildMaterialsMarkdown({
+          title,
+          raw: `从导入目录 ${dir} 导入：PDF \`${pdf.name}\`（${raster.pageCount} 页 · ${raster.dpi} dpi，整页图见 pages/，原 PDF 不复制）${materialRows.length ? `；另带 ${materialRows.length} 份 md` : ""}。`,
+          rows: materialRows,
+        }),
+        "utf8",
+      );
+
+      // 4) 导入说明写进 intent.md 末尾：哪来的、抽到哪几个字段、哪些没做。
+      const intentFile = join(deck.sourceRoot, "intent.md");
+      if (existsSync(intentFile)) {
+        const note = buildImportNote({
+          pdfName: pdf.name,
+          pageCount: raster.pageCount,
+          dpi: raster.dpi,
+          mdFiles: mdTexts.map((entry) => entry.name),
+          fieldSources,
+          warnings,
+        });
+        writeFileSync(intentFile, `${readFileSync(intentFile, "utf8").trimEnd()}\n\n${note}`, "utf8");
+      }
+
+      // 5) 页数 / 标题变了 → 重建 manifest（createDeck 里建的是占位页）。
+      const adapter = adapters.find((item) => item.id === deck.deckId);
+      if (adapter) {
+        try {
+          workspace.ensureDeck(adapter, { forceRebuild: true });
+        } catch (error) {
+          logger?.warn?.(`deck-studio: 导入 deck ${deck.deckId} 重建 manifest 失败：${error?.message ?? error}`);
+        }
+      }
+
+      store.recordEvent({
+        type: "deck.imported",
+        deckId: deck.deckId,
+        actor: "user",
+        status: "succeeded",
+        payload: {
+          label: deck.label,
+          sourceRoot: deck.sourceRoot,
+          importedFrom: dir,
+          pdf: pdf.name,
+          pages: raster.pageCount,
+          dpi: raster.dpi,
+          markdown: mdTexts.map((entry) => entry.name),
+          copiedScript,
+          note: `PDF 导入：${raster.pageCount} 页整页图${copiedScript ? " + script.md" : ""}${materialRows.length ? ` + ${materialRows.length} 份材料` : ""}`,
+        },
+      });
+
+      return {
+        deck: { ...deck, pages: raster.pageCount },
+        importedFrom: dir,
+        pdf: { name: pdf.name, sizeBytes: pdf.sizeBytes },
+        pages: raster.pageCount,
+        dpi: raster.dpi,
+        markdown: mdTexts.map((entry) => entry.name),
+        copiedScript,
+        warnings,
+      };
+    } finally {
+      rmSync(staging, { recursive: true, force: true });
+    }
   }
 
   /**
@@ -2399,7 +2589,7 @@ export function createService(config, logger, env = process.env) {
     bootstrapDesignStyles();
   }
 
-  return { config, store, workspace, adapters, status, state, workbench, readManual, readUserName: () => config.userName, saveUserName, readDoc, docsAsset, setDeckDensity, renderSettings, saveRenderConfig, isLocalDeck: (deckId) => localDeckIds().has(String(deckId ?? "")), assetFile, slideRenderInfo, deckCoverUrl, deckRevisions, deckDocs, deckDoc, deckDocsScaffold, deckDocFile, pageForEdit, pagePrompt, savePage, exportDeckFile, designSamples, sourceFile, homeCatalog, mediaFile, renderState, setRenderSelection, renderRuntime, createDeck, createDesign, createStyleFromDeck, designProjects, designStyle, updateDesignStyle, backfillStyleBriefs, listBindings, bindSession, unbindSession, deleteDesign, deleteDeck, setDeckDesign, addDesignSamples, seedStyleDesigns, renderStatus, exportHandoff, updateBrief, updateStatus, runSelfUpdate }
+  return { config, store, workspace, adapters, status, state, workbench, readManual, readUserName: () => config.userName, saveUserName, readDoc, docsAsset, setDeckDensity, renderSettings, saveRenderConfig, isLocalDeck: (deckId) => localDeckIds().has(String(deckId ?? "")), assetFile, slideRenderInfo, deckCoverUrl, deckRevisions, deckDocs, deckDoc, deckDocsScaffold, deckDocFile, pageForEdit, pagePrompt, savePage, exportDeckFile, designSamples, sourceFile, homeCatalog, mediaFile, renderState, setRenderSelection, renderRuntime, createDeck, importPdfDeck, createDesign, createStyleFromDeck, designProjects, designStyle, updateDesignStyle, backfillStyleBriefs, listBindings, bindSession, unbindSession, deleteDesign, deleteDeck, setDeckDesign, addDesignSamples, seedStyleDesigns, renderStatus, exportHandoff, updateBrief, updateStatus, runSelfUpdate }
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -2846,7 +3036,7 @@ export function apply(ctx, rawConfig) {
    * @param {string} pathValue 绝对路径；空 = 当前生效的 dataRoot
    * @returns {{path: string, parent: string, isRoot: boolean, truncated: boolean, dirs: {name: string, path: string, hidden: boolean, hasScript: boolean, deckCount: number, isDataRoot: boolean}[]}}
    */
-  function browseDir(pathValue) {
+  function browseDir(pathValue, { includeFiles = false } = {}) {
     const raw = String(pathValue ?? "").trim();
     if (raw && !isAbsolute(raw)) {
       const error = new Error(`必须是绝对路径：${raw}`);
@@ -2877,6 +3067,7 @@ export function apply(ctx, rawConfig) {
       throw failed;
     }
     const dirs = [];
+    const files = [];
     let truncated = false;
     for (const entry of entries) {
       if (dirs.length >= BROWSE_MAX_ENTRIES) {
@@ -2893,7 +3084,22 @@ export function apply(ctx, rawConfig) {
           childIsDir = false;
         }
       }
-      if (!childIsDir) continue;
+      if (!childIsDir) {
+        // 导入 PDF 要从这里直接点文件：只认 pdf / md，其它一律不列（不暴露目录里有什么）。
+        if (includeFiles && entry.isFile()) {
+          const kind = /\.pdf$/i.test(entry.name) ? "pdf" : /\.md$/i.test(entry.name) ? "md" : "";
+          if (kind) {
+            let sizeBytes = 0;
+            try {
+              sizeBytes = statSync(childPath).size;
+            } catch {
+              sizeBytes = 0;
+            }
+            files.push({ name: entry.name, path: childPath, kind, sizeBytes });
+          }
+        }
+        continue;
+      }
       dirs.push({
         name: entry.name,
         path: childPath,
@@ -2904,6 +3110,7 @@ export function apply(ctx, rawConfig) {
       });
     }
     dirs.sort((a, b) => a.name.localeCompare(b.name));
+    files.sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === "pdf" ? -1 : 1));
     const parentPath = dirname(target);
     return {
       path: target,
@@ -2911,7 +3118,48 @@ export function apply(ctx, rawConfig) {
       isRoot: parentPath === target,
       truncated,
       dirs,
+      ...(includeFiles ? { files } : {}),
     };
+  }
+
+  /** 有界地找子目录里的 PDF（导入 PDF 用：先看当前层，找不到再一键往下找）。 */
+  function findPdfFiles(rootDir, { maxDepth = 3, maxFiles = 60 } = {}) {
+    const found = [];
+    let truncated = false;
+    const walk = (dir, depth) => {
+      if (found.length >= maxFiles) {
+        truncated = true;
+        return;
+      }
+      let entries = [];
+      try {
+        entries = readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        if (found.length >= maxFiles) {
+          truncated = true;
+          return;
+        }
+        if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
+        const childPath = join(dir, entry.name);
+        if (entry.isFile() && /\.pdf$/i.test(entry.name)) {
+          let sizeBytes = 0;
+          try {
+            sizeBytes = statSync(childPath).size;
+          } catch {
+            sizeBytes = 0;
+          }
+          found.push({ name: entry.name, path: childPath, kind: "pdf", sizeBytes });
+          continue;
+        }
+        if (depth < maxDepth && entry.isDirectory()) walk(childPath, depth + 1);
+      }
+    };
+    walk(rootDir, 0);
+    found.sort((a, b) => a.path.localeCompare(b.path));
+    return { files: found, truncated };
   }
 
   // 目录浏览（目录选择器）：GET ?path=<绝对路径>；缺省 = 当前 dataRoot。
@@ -2920,7 +3168,31 @@ export function apply(ctx, rawConfig) {
     if (switching) return switchingResponse();
     const url = new URL(request?.url ?? "/", "http://localhost");
     try {
-      return json({ ok: true, dir: browseDir(url.searchParams.get("path") ?? "") });
+      const includeFiles = url.searchParams.get("files") === "1";
+      if (url.searchParams.get("find") === "pdf") {
+        const raw = String(url.searchParams.get("path") ?? "").trim();
+        if (raw && !isAbsolute(raw)) {
+          const error = new Error(`必须是绝对路径：${raw}`);
+          error.code = "bad-path";
+          throw error;
+        }
+        const target = resolve(raw || config.dataRoot || process.cwd());
+        let stats;
+        try {
+          stats = statSync(target);
+        } catch {
+          const error = new Error(`目录不存在：${target}`);
+          error.code = "not-found";
+          throw error;
+        }
+        if (!stats.isDirectory()) {
+          const error = new Error(`不是目录：${target}`);
+          error.code = "not-a-dir";
+          throw error;
+        }
+        return json({ ok: true, found: { path: target, ...findPdfFiles(target) } });
+      }
+      return json({ ok: true, dir: browseDir(url.searchParams.get("path") ?? "", { includeFiles }) });
     } catch (error) {
       const code = error?.code ?? "browse-failed";
       const status = code === "switching" ? 409 : code === "browse-failed" ? 500 : 400;
@@ -2992,6 +3264,28 @@ export function apply(ctx, rawConfig) {
     if ((request?.method ?? "POST").toUpperCase() !== "POST") return json({ ok: false, error: { message: "POST only" } }, 405);
     const body = await request.json().catch(() => ({}));
     return json({ ok: true, deck: service.createDeck(body) });
+  }, ["POST"]);
+
+  // PDF 导入：body { dir, file?, title?, dirName?, dpi? }。错误按 code 分支，message 只做兜底（与 dir-browse 一致）。
+  registerRoute(ROUTES.deckImport, async (request) => {
+    if ((request?.method ?? "POST").toUpperCase() !== "POST") return json({ ok: false, error: { code: "method", message: "POST only" } }, 405);
+    const body = await request.json().catch(() => ({}));
+    try {
+      return json({ ok: true, ...service.importPdfDeck(body) });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const code = error?.code === "pdftoppm-missing"
+        ? "pdftoppm-missing"
+        : /不在|没有 PDF|没有这份 PDF|份 PDF|不是 PDF|PDF 不存在/.test(message)
+          ? "no-pdf"
+          : /不存在/.test(message)
+            ? "not-found"
+            : /超过单次导入上限|绝对路径|请先选/.test(message)
+              ? "bad-dir"
+              : "import-failed";
+      const status = code === "import-failed" ? 500 : code === "pdftoppm-missing" ? 501 : 400;
+      return json({ ok: false, error: { code, message } }, status);
+    }
   }, ["POST"]);
 
   // 生图设置（F-126）：body { mode, endpoint, model, apiKeyEnv, apiKeyFile, size }，存本机数据目录并即刻生效。

@@ -6,6 +6,7 @@
 import { lstatSync, realpathSync, readdirSync } from "node:fs";
 import { isAbsolute, resolve, relative, sep, parse, join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { presentNative } from "./present-native.js";
 
 export const name = "deck-studio-capabilities";
 export const inject = ["tools", "workingDirectory", "agents", "systemPrompt"];
@@ -183,7 +184,7 @@ export function createResearchProvider(ctx, config = {}, dependencies = {}) {
           signal: controller.signal,
           setup(agentCtx, child) {
             agentCtx.systemPrompt.suppressRuntimeContext();
-            agentCtx.tools.presentAs("native");
+            presentNative(agentCtx.tools);
             agentCtx.tools.restrict({ allow: [] });
             for (const definition of researchDefinitions) agentCtx.tools.register(definition);
             agentCtx.tools.guard(createCapabilityGuard(ctx, config, { readonly: true, cwd }));
@@ -217,7 +218,7 @@ export function createResearchProvider(ctx, config = {}, dependencies = {}) {
 
 /** Mount ONLY under the main-assistant preset, never the root router mount. */
 export function apply(ctx, config = {}) {
-  ctx.tools.presentAs("native");
+  presentNative(ctx.tools);
   ctx.tools.guard(createCapabilityGuard(ctx, config));
   const provider = createResearchProvider(ctx, config);
   ctx.tools.register({

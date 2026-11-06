@@ -128,6 +128,7 @@
 <section id="homeView" class="home">
   <aside class="home-nav">
     <button class="btn rail-new home-new-deck" id="newDeckBtn">＋ 新建 Deck</button>
+    <button class="btn alt rail-new home-new-deck" id="importPdfBtn" title="把一份 PDF 的每一页转成整页图，建一本 deck">⇪ 导入 PDF</button>
     <nav class="home-nav-list" id="homeNav">
       <button class="home-nav-item" data-section="decks"><span class="hn-icon">▦</span><span class="hn-label">Decks</span><em id="navCountDecks">0</em></button>
       <button class="home-nav-item" data-section="designs"><span class="hn-icon">◈</span><span class="hn-label">Designs</span><em id="navCountDesigns">0</em></button>
@@ -212,6 +213,42 @@
       </div>
       <div class="nd-foot"><span class="small" id="ndState"></span><span class="spacer"></span><button type="button" class="btn alt" id="ndCancel">取消</button><button type="submit" class="btn" id="ndCreate">创建并开始对话</button></div>
     </form>
+  </div>
+</div>
+
+<div id="importPdfModal" class="modal" hidden>
+  <div class="modal-card newdeck-card">
+    <div class="modal-head">
+      <div><div class="eyebrow">Import</div><h2>导入 PDF</h2></div>
+      <button class="modal-close" id="impClose" title="关闭">✕</button>
+    </div>
+    <div class="modal-body newdeck-body">
+      <p class="nd-tip">点一份 PDF：每一页会转成一张整页图，建一本新 deck。
+        <br>同一个文件夹里有 md 就顺手抽（页数对得上当脚本，其余进支撑材料），没有就只导入图。
+        <br>只支持 PDF（本机 poppler 的 <code>pdftoppm</code>）；单次上限 40 页。</p>
+      <div class="imp-picker">
+        <div class="imp-picker-bar">
+          <button type="button" class="btn ghost" id="impUp">↑ 上一级</button>
+          <code id="impPath">—</code>
+        </div>
+        <div class="imp-picker-list" id="impList"><div class="dir-picker-empty">正在读目录…</div></div>
+      </div>
+      <p class="engine-note" id="impSelected">还没有选 PDF：点上面的 📄 文件即可。</p>
+      <div class="nd-foot">
+        <label class="imp-dpi">清晰度
+          <select id="impDpi">
+            <option value="96">96 · 快</option>
+            <option value="120" selected>120 · 默认</option>
+            <option value="200">200 · 更清</option>
+            <option value="300">300 · 最清最慢</option>
+          </select>
+        </label>
+        <span class="spacer"></span>
+        <button type="button" class="btn alt" id="impCancel">取消</button>
+        <button type="button" class="btn" id="impSubmit" disabled>开始导入</button>
+      </div>
+      <p class="engine-note" id="impState"></p>
+    </div>
   </div>
 </div>
 
@@ -518,6 +555,17 @@
 .dir-picker-tag{font-size:10.5px;color:#0f6975}
 .dir-picker-count{font-size:10.5px;color:#8a7a58}
 .dir-picker-list{border:1px solid #e3e1d8;border-radius:10px;max-height:42vh;overflow:auto;background:#fff}
+/* F-203：导入 PDF —— 直接在弹层里点文件，不让人手打目录 / 文件名 */
+.imp-picker{border:1px solid #e4ded0;border-radius:10px;overflow:hidden;margin:8px 0 10px;background:#fff}
+.imp-picker-bar{display:flex;align-items:center;gap:10px;padding:8px 10px;border-bottom:1px solid #f2efe6;background:#faf8f3}
+.imp-picker-bar code{flex:1;min-width:0;font-size:11.5px;color:#6d7f83;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.imp-picker-list{max-height:280px;overflow:auto;padding:2px}
+.imp-picker-list .dir-picker-row.selected{background:#eaf4f1;box-shadow:inset 0 0 0 1px #0d6b62}
+.imp-picker-list .dir-picker-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.imp-picker-list .imp-find{background:#fbf7ec;border-top:1px solid #f2efe6;color:#8a5b12}
+.imp-picker-list .imp-find:hover{background:#f7f1df}
+.imp-dpi{display:flex;align-items:center;gap:6px;font-size:12px;color:#6d7f83}
+.imp-dpi select{font-size:12px;padding:4px 6px;border-radius:8px;border:1px solid #dcd5c6;background:#fff}
 .dir-picker-row{display:flex;gap:10px;align-items:center;width:100%;padding:8px 12px;border:0;border-bottom:1px solid #f2efe6;background:transparent;text-align:left;font-size:12.5px;color:#18343b;cursor:pointer}
 .dir-picker-row:last-child{border-bottom:0}
 .dir-picker-row:hover{background:#f6f9f8}
@@ -1196,15 +1244,18 @@ function openDirPicker(options = {}) {
   const modal = getEl("dirPickerModal");
   if (!modal) return;
   const dd = readDataDir(DIAG_DATA || STATE.data);
-  if (dd.envOverride.active) {
+  const targetId = options.targetId || "frDataRoot";
+  // 只读闸只针对「选数据目录」；导入 PDF 选的是别人的目录，不该被 env 覆盖挡住。
+  const dataDirTarget = targetId === "frDataRoot" || targetId === "frProjectsRoot";
+  if (dataDirTarget && dd.envOverride.active) {
     // env 覆盖时目录是只读的，选也没用——直接说清楚，不弹一个点不动的界面。
     flash(ENV_READONLY_TEXT + "，改环境变量后重启 DSH", "error");
     return;
   }
   DIR_PICKER = {
     mode: options.mode === "switch" ? "switch" : "fill",
-    targetId: options.targetId || "frDataRoot",
-    path: options.path || dd.dataRoot.value || dd.dataRoot.effective || "",
+    targetId,
+    path: options.path || (dataDirTarget ? dd.dataRoot.value || dd.dataRoot.effective || "" : ""),
     data: null,
     loading: true,
     error: "",
@@ -1297,6 +1348,16 @@ async function confirmDirPicker() {
   const path = st.data.path;
   if (st.mode === "fill") {
     const targetId = st.targetId;
+    // 非数据目录的填写目标（导入 PDF 的目录）只往输入框里填，不借首次引导那张表单。
+    if (targetId !== "frDataRoot" && targetId !== "frProjectsRoot") {
+      closeDirPicker();
+      const input = getEl(targetId);
+      if (input) {
+        input.value = path;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      return;
+    }
     closeDirPicker();
     const wizard = getEl("firstRunModal");
     const wizardOpen = wizard && wizard.hidden === false;
@@ -4855,6 +4916,239 @@ getEl("newDeckForm").addEventListener("submit", async (event) => {
     getEl("ndState").textContent = "创建失败：" + error.message;
   } finally {
     getEl("ndCreate").disabled = false;
+  }
+});
+
+/* ---------------- 导入 PDF：点一份 PDF → 每页整页图建 deck；同目录 md 顺手抽（F-203） ----------------
+ * 交互目标（负责人反馈）：不要填目录 / 文件名 / 标题——直接浏览、点那份 PDF，同文件夹的 md 有就抽、没有拉倒。
+ * 目录列表：GET /api/deck-studio.dir-browse?files=1（只回 pdf / md）
+ * 子目录搜索：GET /api/deck-studio.dir-browse?find=pdf&path=…（深度 ≤3、最多 60 份，解决「这层只有文件夹」）
+ * 导入：POST /api/deck-studio.deck-import { pdf: <绝对路径>, dpi } */
+const IMPORT_ERR_TEXT = {
+  "pdftoppm-missing": "本机缺 poppler 的 pdftoppm：macOS 执行 `brew install poppler`，Linux 装 poppler-utils，装完重启 DSH。",
+  "no-pdf": "这个文件夹里没有 PDF（或者这份 PDF 读不到）。",
+  "not-found": "这个路径不存在，检查一下。",
+  "bad-dir": "这个路径不对：要绝对路径，单次最多 40 页。",
+};
+
+function importErrText(code, message) {
+  return IMPORT_ERR_TEXT[code] || message || "导入失败";
+}
+
+const IMP = {
+  path: "",
+  mode: "browse", // browse=看当前目录；found=子目录搜索结果的平铺列表
+  dirs: [],
+  pdfs: [],
+  mdCount: 0,
+  foundFiles: [],
+  foundTruncated: false,
+  stale: false, // 后端还是旧版（dir-browse 没返回 files）——必须重启 DSH
+  loading: false,
+  error: "",
+  selected: null,
+  busy: false,
+};
+
+function impSize(bytes) {
+  const n = Number(bytes) || 0;
+  if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(n / 1024))} KB`;
+}
+
+function impSelectedText() {
+  if (!IMP.selected) return "还没有选 PDF：点上面的 📄 文件即可。";
+  const md = IMP.mdCount ? `同目录 ${IMP.mdCount} 份 md 会一起抽` : "同目录没有 md —— 只导入整页图";
+  return `已选：${IMP.selected.name} · ${md}`;
+}
+
+function impFileRow(file, label) {
+  const selected = IMP.selected?.path === file.path;
+  return `<button type="button" class="dir-picker-row imp-file${selected ? " selected" : ""}" data-imp-pdf="${esc(file.path)}" title="${esc(file.path)}"><span class="dir-picker-name">📄 ${esc(label)}</span><span class="dir-picker-meta">${impSize(file.sizeBytes)}</span></button>`;
+}
+
+function renderImportPicker() {
+  const list = getEl("impList");
+  if (!list) return;
+  getEl("impPath").textContent = IMP.mode === "found" ? `${IMP.path}（含子目录）` : IMP.path || "—";
+  getEl("impPath").title = IMP.path || "";
+  getEl("impUp").disabled = IMP.loading || !IMP.path || IMP.mode === "found";
+  getEl("impSubmit").disabled = !IMP.selected || IMP.busy;
+  getEl("impSelected").textContent = impSelectedText();
+
+  if (IMP.loading) {
+    list.innerHTML = `<div class="dir-picker-empty">正在读目录…</div>`;
+    return;
+  }
+  if (IMP.error) {
+    list.innerHTML = `<div class="dir-picker-empty">${esc(IMP.error)}</div>`;
+    return;
+  }
+  if (IMP.stale) {
+    list.innerHTML = `<div class="dir-picker-empty">这个弹层是新版，但**正在运行的 Deckline 后端还是旧版**：<br>接口没返回文件列表，所以只看得到文件夹。<br><br>重启 DSH（<code>dsh --profile deck-studio</code> 或 DSH 桌面端）后再打开这里。</div>`;
+    return;
+  }
+
+  if (IMP.mode === "found") {
+    const rows = IMP.foundFiles.length
+      ? IMP.foundFiles.map((file) => impFileRow(file, file.path.replace(`${IMP.path.replace(/[\\/]+$/, "")}/`, ""))).join("")
+      : `<div class="dir-picker-empty">子目录里也没找到 PDF（只看 3 层）。</div>`;
+    list.innerHTML = `<button type="button" class="dir-picker-row" data-imp-back="1"><span class="dir-picker-name">↩ 回到目录列表</span></button>${rows}${IMP.foundTruncated ? `<div class="dir-picker-empty">只列了前 60 份，缩小范围再找。</div>` : ""}`;
+    return;
+  }
+
+  const dirs = (IMP.dirs || []).filter((item) => !item.hidden);
+  const pdfs = IMP.pdfs || [];
+  const findRow = dirs.length
+    ? `<button type="button" class="dir-picker-row imp-find" data-imp-find="1"><span class="dir-picker-name">🔍 ${pdfs.length ? "这层也有 PDF；在子目录里再找一遍" : "这层没有 PDF —— 在子目录里找（≤3 层）"}</span></button>`
+    : "";
+  const body = [
+    ...pdfs.map((file) => impFileRow(file, file.name)),
+    ...dirs.map((dir) => `<button type="button" class="dir-picker-row" data-imp-dir="${esc(dir.path)}" title="${esc(dir.path)}"><span class="dir-picker-name">📁 ${esc(dir.name)}</span></button>`),
+  ].join("");
+  if (!body) {
+    list.innerHTML = `<div class="dir-picker-empty">这个文件夹里没有子目录，也没有 PDF。点「↑ 上一级」换个位置。</div>`;
+    return;
+  }
+  list.innerHTML = body + findRow;
+}
+
+async function impFetchJson(url) {
+  const res = await fetch(url, { headers: { accept: "application/json" } });
+  let payload = {};
+  try { payload = await res.json(); } catch { /* 非 JSON 兜底 */ }
+  if (!res.ok || !payload?.ok) {
+    const failure = new Error(payload?.error?.message || `HTTP ${res.status}`);
+    failure.code = payload?.error?.code || "";
+    throw failure;
+  }
+  return payload;
+}
+
+async function impLoad(pathValue) {
+  IMP.loading = true;
+  IMP.error = "";
+  IMP.selected = null;
+  IMP.mode = "browse";
+  IMP.stale = false;
+  renderImportPicker();
+  try {
+    const query = pathValue ? `?files=1&path=${encodeURIComponent(pathValue)}` : "?files=1";
+    const payload = await impFetchJson("/api/deck-studio.dir-browse" + query);
+    const dir = payload.dir || {};
+    IMP.path = dir.path || pathValue || "";
+    IMP.dirs = dir.dirs || [];
+    // 旧版后端不会返回 files：明确说「要重启」，别让人以为目录里真没 PDF。
+    IMP.stale = !Array.isArray(dir.files);
+    const files = Array.isArray(dir.files) ? dir.files : [];
+    IMP.pdfs = files.filter((file) => file.kind === "pdf");
+    IMP.mdCount = files.filter((file) => file.kind === "md").length;
+  } catch (error) {
+    IMP.error = importErrText(error?.code, error?.message);
+    IMP.dirs = [];
+    IMP.pdfs = [];
+    IMP.mdCount = 0;
+  } finally {
+    IMP.loading = false;
+    renderImportPicker();
+  }
+}
+
+async function impFindPdfs() {
+  IMP.loading = true;
+  IMP.error = "";
+  renderImportPicker();
+  try {
+    const payload = await impFetchJson(`/api/deck-studio.dir-browse?find=pdf&path=${encodeURIComponent(IMP.path)}`);
+    IMP.foundFiles = payload.found?.files || [];
+    IMP.foundTruncated = Boolean(payload.found?.truncated);
+    IMP.mode = "found";
+  } catch (error) {
+    IMP.error = importErrText(error?.code, error?.message);
+  } finally {
+    IMP.loading = false;
+    renderImportPicker();
+  }
+}
+
+const IMP_LAST_DIR_KEY = "deckImportLastDir";
+
+function openImportPdfModal() {
+  IMP.busy = false;
+  IMP.selected = null;
+  IMP.stale = false;
+  getEl("impState").textContent = "";
+  getEl("impDpi").value = "120";
+  getEl("importPdfModal").hidden = false;
+  let start = "";
+  try { start = localStorage.getItem(IMP_LAST_DIR_KEY) || ""; } catch { start = ""; }
+  if (!start) start = String(STATE.data?.config?.dataRoot || "").trim();
+  impLoad(start);
+}
+
+function closeImportPdfModal() {
+  getEl("importPdfModal").hidden = true;
+}
+
+getEl("importPdfBtn").addEventListener("click", openImportPdfModal);
+getEl("impClose").addEventListener("click", closeImportPdfModal);
+getEl("impCancel").addEventListener("click", closeImportPdfModal);
+getEl("importPdfModal").addEventListener("click", (event) => { if (event.target === getEl("importPdfModal")) closeImportPdfModal(); });
+getEl("impUp").addEventListener("click", () => {
+  if (!IMP.path || IMP.mode === "found") return;
+  const parent = IMP.path.replace(/[\\/]+$/, "").replace(/[\\/][^\\/]+$/, "");
+  impLoad(parent || "/");
+});
+getEl("impList").addEventListener("click", (event) => {
+  if (event.target.closest("[data-imp-back]")) {
+    impLoad(IMP.path);
+    return;
+  }
+  if (event.target.closest("[data-imp-find]")) {
+    impFindPdfs();
+    return;
+  }
+  const dirHit = event.target.closest("[data-imp-dir]");
+  if (dirHit) {
+    impLoad(dirHit.dataset.impDir);
+    return;
+  }
+  const pdfHit = event.target.closest("[data-imp-pdf]");
+  if (pdfHit) {
+    IMP.selected = [...IMP.pdfs, ...IMP.foundFiles].find((file) => file.path === pdfHit.dataset.impPdf) || null;
+    renderImportPicker();
+  }
+});
+getEl("impSubmit").addEventListener("click", async () => {
+  if (!IMP.selected || IMP.busy) return;
+  IMP.busy = true;
+  getEl("impSubmit").disabled = true;
+  getEl("impState").textContent = `正在把 ${IMP.selected.name} 每页转成整页图（页数多会慢一点，别关页面）…`;
+  try {
+    const res = await fetch("/api/deck-studio.deck-import", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pdf: IMP.selected.path, dpi: Number(getEl("impDpi").value) || 120 }),
+    });
+    const result = await res.json().catch(() => ({}));
+    if (!res.ok || !result.ok) {
+      const failure = new Error(result?.error?.message || `HTTP ${res.status}`);
+      failure.code = result?.error?.code || "";
+      throw failure;
+    }
+    try { localStorage.setItem(IMP_LAST_DIR_KEY, IMP.path); } catch { /* 隐私模式忽略 */ }
+    const parts = [`已导入 ${result.pages} 页（${result.dpi} dpi）`];
+    if (result.markdown?.length) parts.push(`抽到 md：${result.markdown.join("、")}`);
+    if (result.warnings?.length) parts.push(`注意：${result.warnings.join("；")}`);
+    getEl("impState").textContent = parts.join(" · ");
+    closeImportPdfModal();
+    flash(`已导入「${result.deck?.label || ""}」：${result.pages} 页整页图`, "ok");
+    if (result.deck?.deckId) await showDeck(result.deck.deckId);
+  } catch (error) {
+    getEl("impState").textContent = "导入失败：" + importErrText(error?.code, error?.message);
+  } finally {
+    IMP.busy = false;
+    getEl("impSubmit").disabled = !IMP.selected;
   }
 });
 
