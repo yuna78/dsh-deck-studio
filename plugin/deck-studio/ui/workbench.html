@@ -186,7 +186,7 @@
       <p class="nd-tip">先定「讲给谁、讲什么、想带走什么」+ 视觉风格。创建后会开出源目录与 9 份文档骨架，然后在对话里继续补资料、改 script，直到可以出图。<br>新项目保存位置：<code id="ndStoragePath">正在读取配置…</code>。<span id="ndStorageNote"></span></p>
       <label class="field"><span>主题 / 标题</span><input id="ndTitle" required placeholder="例：XX 业务场景的 AI 落地分享"></label>
       <label class="field"><span>项目目录名（可选，英文小写中划线；留空自动生成）</span><input id="ndDirName" placeholder="例：talk-ai-transformation-6-stages"></label>
-      <label class="field"><span>页数（占位页 1–40；创建后还能在对话里追加）</span><input id="ndPages" type="number" min="1" max="40" inputmode="numeric" value="6"></label>
+      <label class="field"><span>页数（占位页 1–40；创建后还能在对话里追加或插页）</span><input id="ndPages" type="number" min="1" max="40" inputmode="numeric" value="6"></label>
       <label class="field"><span>内容密度（一页正文 / 画面要求的目标字数；之后可在 deck 工具栏改）</span>
         <select id="ndDensity">
           <option value="auto" selected>自动 —— 由 Agent 按内容判断每页长短（不设固定字数）</option>
@@ -426,8 +426,8 @@
       <button class="modal-close" id="apClose" title="关闭">✕</button>
     </div>
     <div class="modal-body">
-      <p class="engine-note">填完后点「发送到 Chat」：这段会作为一条完整指令发给 Agent，由它调 <code>deck_script_add_page</code> 出「追加页提案」；我确认后才落 revision（V1 只支持追加到最后一页之后，避免打乱既有页的版本目录）。</p>
-      <div class="field"><label>位置（V1 只支持追加到最后一页之后）</label><select id="apAfter"></select></div>
+      <p class="engine-note">填完后点「发送到 Chat」：这段会作为一条完整指令发给 Agent——追加到末尾调 <code>deck_script_add_page</code>，插到中间或开场位调 <code>deck_script_insert_page</code>；Agent 先出提案，我确认后才落 revision。插页会重排页号，既有页连同已出的图一起后移（图跟着内容走），<b>不需要重出整份</b>。</p>
+      <div class="field"><label>插入位置（默认追加到最后一页之后；也可选任意一页之后，或 P01 之前当新的开场位）</label><select id="apAfter"></select></div>
       <div class="field"><label>页面标题（必填）</label><input id="apTitle" placeholder="例：一张工作观察卡，把五个问题变成检查栏"></div>
       <div class="field"><label>这一页要回答什么（一句话主张）</label><input id="apClaim" placeholder="例：先看见一段工作，再决定 AI 应该进入哪一步"></div>
       <div class="field"><label>页面内容 / 结构（一条一行，会原样变成该页正文）</label><textarea id="apBody" rows="6" placeholder="例：
@@ -2770,7 +2770,9 @@ function renderDoc(doc, index) {
       ? `<div class="review-panel"><p class="proposal-strip-note">评审意见 <b>${reviewBatch.length}</b> 条 · 勾选后点「接受并更新」合成<b>一条</b> revision（旧版保留，可回滚）；不点就什么都不改</p>${reviewBatch.map(reviewRow).join("")}<div class="review-actions"><button class="btn solid" data-accept-review="1">接受并更新所选</button><span class="review-hint">A=原文可定位；B=转述或支撑偏弱；D=原文在但推不出结论（默认不勾，只作参考）；C=无法核实，不进清单</span></div></div>`
       : "";
     return head + styleNote + densityNote + briefBanner + docIssues(doc) + storyOverview + banner + reviewPanel + `<div class="page-cards">${pages.map((page) => {
-      const pageProposals = pendingByPage.get(Number(page.page)) || [];
+      // 追加页 / 插页是整份结构提案（kind=script-add-page / script-insert-page），没有「当前值 → 建议值」单值，
+      // 不进页内提案行；它们的 diff 在顶部 banner + 观察页里确认。
+      const pageProposals = (pendingByPage.get(Number(page.page)) || []).filter((proposal) => proposal.kind !== "script-add-page" && proposal.kind !== "script-insert-page");
       const slide = slideById.get(page.id) || {};
       // 已落版值（manifest）优先：确认过的 title/question/body 必须立刻显示，不能被源文档快照盖住。
       const pageTitle = slide.title || page.title;
@@ -2778,8 +2780,8 @@ function renderDoc(doc, index) {
       const bodyText = String(slide.body || page.content || "").trim();
       // visualBrief（manifest）才是出图真正用的提示词；prompts/Pxx.txt 是源侧旧文件。
       const promptText = slide.visualBrief || page.prompt || "";
-      const fieldProposals = pageProposals.filter((proposal) => proposal.field !== "script-add-page");
-      const staleForPage = stalePending.filter((proposal) => Number(proposal.page) === Number(page.page));
+      const fieldProposals = pageProposals.filter((proposal) => proposal.kind !== "script-add-page" && proposal.kind !== "script-insert-page");
+      const staleForPage = stalePending.filter((proposal) => Number(proposal.page) === Number(page.page) && proposal.kind !== "script-add-page" && proposal.kind !== "script-insert-page");
       const expiredForPage = pageProposals.filter((proposal) => proposal.stale);
       // 「两套」问题的修法：卡片上半部分明确是当前已落版内容，提案行显示「当前值 → 建议值」。
       const proposalBlock = pageProposals.length
@@ -2987,7 +2989,7 @@ const stripFrontmatter = (text) => String(text ?? "").replace(/^---\n[\s\S]*?\n-
 const docFileUrl = (docId, name) => `/api/deck-studio.docfile?` + new URLSearchParams({ deckId: STATE.data.active.deckId, docId, name });
 
 /** F-108：提案字段的展示名 + 预览值（分节提案的 after 是 `**字段**：值` 整行）。 */
-const PROPOSAL_FIELD_LABEL = { title: "标题", question: "副标题", claim: "主张", body: "正文", visualBrief: "画面要求", "script-add-page": "追加页" };
+const PROPOSAL_FIELD_LABEL = { title: "标题", question: "副标题", claim: "主张", body: "正文", visualBrief: "画面要求", "add-page": "追加页", "insert-page": "插入页", "script-add-page": "追加页", "script-insert-page": "插入页" };
 function proposalFieldLabel(field) {
   return PROPOSAL_FIELD_LABEL[field] || field || "修改";
 }
@@ -3182,7 +3184,8 @@ function bindDocActions(root) {
   root.querySelectorAll("[data-reject-proposal]").forEach((btn) => btn.addEventListener("click", () => decideProposals([btn.dataset.rejectProposal], false)));
   root.querySelectorAll("[data-confirm-page]").forEach((btn) => btn.addEventListener("click", () => {
     const page = Number(btn.dataset.confirmPage);
-    const ids = latestByField(deckPendingProposals().filter((proposal) => Number(proposal.page) === page && !proposal.stale)).map((proposal) => proposal.proposalId);
+    // 结构提案（追加页 / 插页）不挂在页卡的「当前值 → 建议值」行上，不能被「这一页全部确认」顺手带走。
+    const ids = latestByField(deckPendingProposals().filter((proposal) => Number(proposal.page) === page && !proposal.stale && proposal.kind !== "script-add-page" && proposal.kind !== "script-insert-page")).map((proposal) => proposal.proposalId);
     decideProposals(ids, true);
   }));
   root.querySelectorAll("[data-confirm-all]").forEach((btn) => btn.addEventListener("click", () => decideProposals(freshProposalIds(), true)));
@@ -4145,9 +4148,18 @@ async function sendAgentPrompt() {
   state.textContent = "正在发送到左侧对话…";
   try {
     await ensurePromptConversation();
+    // F-211：先把「该显示哪个会话」推给宿主 Dock，再发——否则消息到了、左侧还停在旧会话。
+    publishChatSessionToHost(true);
     const result = await requestNativeChat(text);
     if (!result.ok) {
       state.textContent = `未能直接发送${result.reason ? `（${result.reason}）` : ""} · 可复制后手动粘贴`;
+      return;
+    }
+    // F-211：核对落点。宿主要么发进我们给的会话，要么如实回它发去了哪；不一致就别谎报「已发送」。
+    const want = currentChatSessionId();
+    const landed = result.sessionId || "";
+    if (landed && want && landed !== want) {
+      state.textContent = `已发送到另一个会话（${landed.replace(/^session-/, "").slice(0, 8)}…），不是左侧这个；用左上「会话 ▾」切过去，或复制后手动粘贴`;
       return;
     }
     state.textContent = "已发送到左侧对话 ✓";
@@ -4855,7 +4867,7 @@ getEl("newDeckForm").addEventListener("submit", async (event) => {
     description: pickedDeckStyle()?.description || getEl("ndStyle").value.trim(),
   };
   // 0.2.18：探索式只提交「标题 + 风格」——被隐藏字段里可能还留着旧值，不能偷偷带上；
-  // 页数先占 1 页占位，等对话里把故事线聊清楚再追加。
+  // 页数先占 1 页占位，等对话里把故事线聊清楚再追加或插页。
   const payload = explore
     ? { title: getEl("ndTitle").value.trim(), mode: "explore", pages: 1, style }
     : {
@@ -4897,14 +4909,14 @@ getEl("newDeckForm").addEventListener("submit", async (event) => {
         `1) 先一次问完 3–5 个关键问题（讲给谁 / 听完要带走什么 / 什么场合和时长 / 手上有没有现成材料 / 有没有必须避开的边界），别一条一条挤牙膏；\n` +
         `2) 我回答后，用 deck_doc_update（docId=intent）把听众 / 带走 / 场合 / 成功标准 / 不讲的写回去；没依据的字段写成「待确认：缺依据，已列问题」，不要编，也不要留模板占位；\n` +
         `3) 再给一版故事线草案：分几段、每段回答什么、大概几页（不确定就给区间），等我确认；\n` +
-        `4) 我确认后再用 deck_script_add_page / 提案改 script；要出图我会明确说。\n` +
+        `4) 我确认后再用 deck_script_add_page（末尾加页）/ deck_script_insert_page（插到某页之前，既有页图跟着内容后移、不用重出整份）/ 提案改 script；要出图我会明确说。\n` +
         `材料里没有的数字 / 客户 / 案例 / URL 不要编。`,
         "探索式新建 · 首条消息发给 Agent",
       );
     } else {
     sendPrompt(
       `我刚新建了 deck「${label}」（${deckId}）。\n` +
-      `页数：已按 ${payload.pages} 页占位（P01–P${String(payload.pages).padStart(2, "0")}）；页数要改就在对话里说，用 deck_script_add_page 追加。\n` +
+      `页数：已按 ${payload.pages} 页占位（P01–P${String(payload.pages).padStart(2, "0")}）；页数要改就在对话里说：末尾加页用 deck_script_add_page，插到中间/开场位用 deck_script_insert_page（at=插到第几页之前，既有页图跟着内容后移、不用重出整份）。\n` +
       `受众：${payload.audience || "待确认"}；话题：${payload.topic || "待确认"}；\n` +
       `意图/希望带走：${payload.intent || "待确认"}；\n` +
       `场合/时长：${payload.occasion || "（未填，请根据意图判断或问我）"}；` +
@@ -4919,7 +4931,7 @@ getEl("newDeckForm").addEventListener("submit", async (event) => {
       `2) 分析每份资料：出处 / 类型 / 能引用的事实 / 能支撑哪条主张 / 还缺什么 → 用 deck_doc_update（docId=materials）写进「支撑材料」；\n` +
       `3) 把 intent 里空着的「场合 / 时长」「成功标准」「不讲的」按意图 + 资料做判断补全 → 用 deck_doc_update（docId=intent）写回；没依据的字段不要编，列成问题问我，并把该字段写成「待确认：缺依据，已列问题」，不要留模板占位；\n` +
       `4) 需要时再用 deck_doc_update（docId=research）补调研条目。\n` +
-      `5) 页数不够/多了：用 deck_script_add_page 追加页（先提案、我确认后再 deck_revision_confirm）；不要直接改 script.md，也不要回答「工具不支持加页」。\n` +
+      `5) 页数不够/多了：末尾加页用 deck_script_add_page，中间/开场插页用 deck_script_insert_page（at=插到第 N 页之前；既有页号与已出图整体后移、图跟着内容走，不用重出整份）（先提案、我确认后再 deck_revision_confirm）；不要直接改 script.md，也不要回答「工具不支持加页/不支持插页」或建议我重出整份。\n` +
       `材料里没有的数字 / 客户 / 案例 / URL 不要编。做完复述你补了什么、还缺什么，再等我确认后起 script 草案，不要直接出图。`,
       "新建 deck · 下一步发给 Agent",
     );
@@ -5246,14 +5258,34 @@ getEl("renderBtn").addEventListener("click", () => renderSlidePrompt(STATE.selec
 /* ---------------- 添加页面：结构化弹层 → 发到 DSH 原生 Chat ---------------- */
 
 const ADD_PAGE = { open: false };
+/** 页号：manifest 的 slide.order 是 1-based 页号（插页确认后会整体重排）。 */
+function slidePageNumber(slide, index) {
+  const order = Number(slide?.order);
+  return Number.isFinite(order) && order >= 1 ? order : index + 1;
+}
+/** 「添加一页」的位置选项：默认追加末尾 + 每个已有页之后 + P01 之前（开弹窗时按当前页数重算）。 */
+function addPagePositionOptions(slides) {
+  const list = Array.isArray(slides) ? slides : [];
+  const pad = (value) => String(value).padStart(2, "0");
+  const total = list.length;
+  const options = [
+    `<option value="end" selected>${total ? `追加到最后一页之后（P${pad(total)} 之后）` : "追加到最后一页之后（当前还没有页）"}</option>`,
+  ];
+  list.forEach((slide, index) => {
+    const pageNo = slidePageNumber(slide, index);
+    options.push(`<option value="after:${pageNo}">P${pad(pageNo)} 之后</option>`);
+  });
+  options.push(`<option value="before:1">P01 之前（新的开场位）</option>`);
+  return options.join("");
+}
 function openAddPageModal() {
   const active = STATE.data?.active;
   if (!active) return;
   const slides = active.slides || [];
   const select = getEl("apAfter");
-  select.innerHTML = `<option value="end" selected>最后一页之后（P${String(slides.length).padStart(2, "0")} 之后）</option>`;
+  select.innerHTML = addPagePositionOptions(slides);
   select.value = "end";
-  select.disabled = true;
+  select.disabled = false;
   getEl("apTitle").value = "";
   getEl("apClaim").value = "";
   getEl("apBody").value = "";
@@ -5269,10 +5301,39 @@ function closeAddPageModal() {
   getEl("addPageModal").hidden = true;
   ADD_PAGE.open = false;
 }
+/**
+ * 解析「添加一页」的位置选择：
+ * - end → 追加到末尾（deck_script_add_page）
+ * - after:N → 插到 P0N 之后 = at=N+1（deck_script_insert_page）
+ * - before:1 → 插到 P01 之前 = at=1（deck_script_insert_page，新的开场位）
+ */
+function readAddPagePosition(slides) {
+  const list = Array.isArray(slides) ? slides : [];
+  const total = list.length;
+  const pad = (value) => String(value).padStart(2, "0");
+  const raw = String(getEl("apAfter").value || "end");
+  if (raw.startsWith("after:")) {
+    const pageNo = Number.parseInt(raw.slice("after:".length), 10);
+    if (Number.isFinite(pageNo) && pageNo >= 1) {
+      return {
+        mode: "insert",
+        at: pageNo + 1,
+        label: `P${pad(pageNo)} 之后（at=${pageNo + 1}，即插到第 ${pageNo + 1} 页之前）`,
+        atLast: pageNo >= total,
+      };
+    }
+  }
+  if (raw.startsWith("before:")) {
+    const pageNo = Number.parseInt(raw.slice("before:".length), 10);
+    const at = Number.isFinite(pageNo) && pageNo > 1 ? pageNo : 1;
+    return { mode: "insert", at, label: `P${pad(at)} 之前（at=${at}，新的开场位）`, atLast: false };
+  }
+  return { mode: "append", at: total + 1, label: `最后一页（P${pad(total)}）之后（追加到末尾）`, atLast: false };
+}
 function buildAddPagePrompt() {
   const active = STATE.data?.active || {};
   const slides = active.slides || [];
-  const afterText = `最后一页（P${String(slides.length).padStart(2, "0")}）之后（追加）`;
+  const position = readAddPagePosition(slides);
   const title = getEl("apTitle").value.trim();
   const claim = getEl("apClaim").value.trim();
   const body = getEl("apBody").value.trim();
@@ -5284,7 +5345,7 @@ function buildAddPagePrompt() {
     return "";
   }
   const lines = [
-    `请在 deck「${active.title || active.deckId}」（${active.deckId}）里新增一页，位置：${afterText}。`,
+    `请在 deck「${active.title || active.deckId}」（${active.deckId}）里${position.mode === "insert" ? "插入一页" : "新增一页"}，位置：${position.label}。`,
     ``,
     `页面标题：${title}`,
   ];
@@ -5295,13 +5356,21 @@ function buildAddPagePrompt() {
   }
   if (visual) lines.push(``, `画面要求：${visual}`);
   if (prompt) lines.push(``, `出图提示词草稿（可润色）：`, `"""`, prompt, `"""`);
-  lines.push(
-    ``,
-    `要求：`,
-    `1. 调 deck_script_add_page（deckId=${active.deckId}）追加一页：title / question / claim / body / visualBrief 一次给全；不要自己改 script.md（你也没有写文件的工具）；`,
-    `2. 把工具返回的 diff 贴给我，等我确认后再调 deck_revision_confirm（confirmationQuote 引用我原话）；`,
-    `3. 新页默认没有图：先补 visualBrief 再出这一页；这一轮只处理新增页，别的页别动。`,
-  );
+  lines.push(``, `要求：`);
+  if (position.mode === "insert") {
+    lines.push(
+      `1. 调 deck_script_insert_page（deckId=${active.deckId}, at=${position.at}）：pages 数组里给一项 { title, question, claim, body, visualBrief }，一次给全；reason 写一句为什么插在这里。不要自己改 script.md（你也没有写文件的工具）；`,
+      `2. 插入后既有页的页号会整体后移（页号 >= ${position.at} 的页 +1）${position.atLast ? "；这里 at 已等于末页之后，等价于追加到末尾" : ""}；已出的图跟着各自内容走（slides 目录随页迁移），**不需要重出整份，也不要建议我重出整份**；`,
+      `3. 把工具返回的 diff 贴给我，等我确认后再调 deck_revision_confirm（confirmationQuote 引用我原话）；`,
+      `4. 新页默认没有图：先补 visualBrief 再出这一页；这一轮只处理新增页，别的页的内容和画面要求别动。`,
+    );
+  } else {
+    lines.push(
+      `1. 调 deck_script_add_page（deckId=${active.deckId}）：pages 数组里给一项 { title, question, claim, body, visualBrief }，一次给全；reason 写一句为什么加这一页。不要自己改 script.md（你也没有写文件的工具）；`,
+      `2. 把工具返回的 diff 贴给我，等我确认后再调 deck_revision_confirm（confirmationQuote 引用我原话）；`,
+      `3. 新页默认没有图：先补 visualBrief 再出这一页；这一轮只处理新增页，别的页别动。`,
+    );
+  }
   return lines.join("\n");
 }
 async function sendAddPageToChat() {
@@ -5402,6 +5471,20 @@ function setupNativeChat() {
  * 桌面（dsh-app://app）的对话列：不嵌 DSH 页面，把头部保留成「绑定 + 会话切换」，
  * 动作经宿主桥（client.js）在宿主主区打开原生会话；打开成功后关闭工作台面板。
  */
+/**
+ * 桌面 Dock：把「本 deck / design 的会话」报给宿主，Dock 据此渲染原生会话。
+ * F-211：从 setupHostChatColumn 里提出来，发送指令前后可以立刻推一次，
+ * 不用等 1.2s 心跳（否则会出现「消息已经到了、左侧还是旧会话」）。
+ */
+let chatSessionPublished = "§init§";
+function publishChatSessionToHost(force = false) {
+  if (!DESKTOP_HOST) return;
+  const sessionId = currentChatSessionId();
+  if (!force && sessionId === chatSessionPublished) return;
+  chatSessionPublished = sessionId;
+  try { window.parent?.postMessage({ type: "dsh-deck-studio:chat-session", sessionId }, "*"); } catch { /* 宿主桥不可用 */ }
+}
+
 function setupHostChatColumn() {
   const column = getEl("chatCol");
   const frame = getEl("nativeChatFrame");
@@ -5418,15 +5501,8 @@ function setupHostChatColumn() {
     if (!STATE.dockActive) getEl("chatHostCard").hidden = false;
   }, 6000);
   // 心跳把当前绑定会话报给宿主：Dock 据此用原生会话盖住 #chatDockArea。
-  let lastPublished = "§init§";
-  const publishChatSession = () => {
-    const sessionId = currentChatSessionId();
-    if (sessionId === lastPublished) return;
-    lastPublished = sessionId;
-    try { window.parent?.postMessage({ type: "dsh-deck-studio:chat-session", sessionId }, "*"); } catch { /* 宿主桥不可用 */ }
-  };
-  setInterval(publishChatSession, 1200);
-  try { window.parent?.postMessage({ type: "dsh-deck-studio:chat-session", sessionId: lastPublished = currentChatSessionId() }, "*"); } catch { /* 同上 */ }
+  setInterval(() => publishChatSessionToHost(), 1200);
+  publishChatSessionToHost(true);
   window.addEventListener("message", (event) => {
     if (event.source !== window.parent) return;
     if (event.data?.type !== "dsh-deck-studio:chat-dock") return;
@@ -5505,21 +5581,34 @@ function nativeChatWindow() {
 function requestNativeChat(text) {
   const target = nativeChatWindow();
   if (!target) return Promise.resolve({ ok: false, reason: "没有可用的 DSH 对话窗口" });
+  /**
+   * F-211：必须把「本 deck / design 的会话」一起送过去，不能让宿主自己挑。
+   * 桌面 Dock 模式下宿主记的 `dsh.sessions.current` 是宿主主区那个会话（见 currentChatSessionId 的注释），
+   * 常常不是左侧 Dock 正在显示的这个——只发 text 会让指令落进隔壁会话：
+   * 弹层提示「已发送到左侧对话 ✓」，左边却什么也没有（2026-11-07 真机复现：
+   * 指令进了未绑定的 session-a274e455，绑定的 session-e2eda8c9 一直空着）。
+   */
+  const sessionId = currentChatSessionId();
   return new Promise((resolve) => {
     let settled = false;
     const onAck = (event) => {
       if (event.data?.type !== "dsh-deck-studio:prompt-ack") return;
       settled = true;
       window.removeEventListener("message", onAck);
-      resolve({ ok: Boolean(event.data.ok), reason: event.data.reason || "" });
+      resolve({
+        ok: Boolean(event.data.ok),
+        sessionId: event.data.sessionId || sessionId,
+        reason: event.data.reason || "",
+      });
     };
     window.addEventListener("message", onAck);
-    target.postMessage({ type: "dsh-deck-studio:prompt", text }, "*");
+    target.postMessage({ type: "dsh-deck-studio:prompt", text, sessionId }, "*");
     setTimeout(() => {
       if (settled) return;
       window.removeEventListener("message", onAck);
-      resolve({ ok: false, reason: "宿主 2.5s 内没有回应" });
-    }, 2500);
+      // 宿主 inject 会话上下文（最多 1.5s）再 send，2.5s 太紧，容易「其实发出去了但界面报没回应」。
+      resolve({ ok: false, reason: "宿主 8s 内没有回应" });
+    }, 8000);
   });
 }
 
@@ -5556,6 +5645,8 @@ function requestConversation(payload) {
       sourceRoot: STATE.data?.active?.sourceRoot || "",
       // 0.2.16：宿主要按「deck 自己的项目目录」建会话工作区（桌面里 cwd 是 profile 目录，用不了）。
       sessionWorkspacePath: STATE.data?.active?.sessionWorkspacePath || "",
+      // F-210：宿主拿它给工作区起名（`Deckline · <deck 标题>`），侧栏才像 HTML Deck 一样按 deck 分组。
+      title: STATE.data?.active?.title || "",
       ...payload,
       // F-202B：桌面 Dock 模式默认不抢主区（open:false）；显式 takeMain → open:true 切宿主主区。
       // web 不传 open（undefined → 宿主按原语义 openSession）。
@@ -5999,6 +6090,8 @@ function renderChatHeader() {
   const label = getEl("chatSessionLabel");
   const count = getEl("chatSessionCount");
   const target = activeChatTarget();
+  // F-211：头部重画时顺手把「该显示哪个会话」推给宿主 Dock（内部去重，未变化不重复 postMessage）。
+  publishChatSessionToHost();
   if (!target) {
     chip.textContent = "—";
     chip.className = "bind-chip unbound";

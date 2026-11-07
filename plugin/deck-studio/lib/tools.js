@@ -58,6 +58,28 @@ function sessionIdOf(exec) {
 }
 
 /**
+ * F-209：新页与稿子里已有页「同标题」时给出明确提醒。
+ * 插页/追加都只新增、不替换——用户拿「追加」当「搬位置」时会出现两套内容（
+ * 事故：先追加 P22/P23，再插页同一内容到 P02/P03，deck 里就多出一套）。
+ * 只做提醒，不阻断（有时确实要两页同标题的不同版本）；文案要让 Agent 先说清楚、别默认重复。
+ */
+function duplicateContentNotes(deck, specs) {
+  const normalize = (value) => String(value ?? "").replace(/[\s，。！？、；："'“”‘’（）()]/g, "").trim();
+  const existing = (deck?.slides ?? [])
+    .map((slide) => ({ id: slide.id, order: Number(slide.order) || null, title: normalize(slide.title), rawTitle: String(slide.title ?? "").trim() }))
+    .filter((slide) => slide.title);
+  const notes = [];
+  for (const spec of specs ?? []) {
+    const title = normalize(spec?.title);
+    if (!title) continue;
+    const hit = existing.find((slide) => slide.title === title);
+    if (hit) notes.push(`P${String(hit.order ?? 0).padStart(2, "0")}「${hit.rawTitle}」`);
+  }
+  return notes;
+}
+
+
+/**
  * Agent 可读的参考资料白名单（F-71）。
  *
  * 背景：Agent 只有 deck_* 工具，没有通用文件工具——弹窗「参考资料」里给的
@@ -994,6 +1016,7 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
       const preview = workspace.appendScriptPages(current, specs);
       const pageIds = specs.map((spec) => `p${String(spec.page).padStart(2, "0")}`);
       const diff = scriptDiff(current, preview.text);
+      const duplicateNotes = duplicateContentNotes(deck, specs);
       const proposal = {
         proposalId: newProposalId(),
         deckId: deck.id,
@@ -1014,6 +1037,7 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
         status: "waiting-user",
         createdAt: proposalNow(),
         sessionId: sessionIdOf(exec),
+        ...(duplicateNotes.length ? { duplicatePages: duplicateNotes } : {}),
       };
       workspace.saveProposal(proposal);
 
@@ -1052,8 +1076,147 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
         diff,
         text:
           `追加页提案 ${proposal.proposalId} 已进入 waiting-user：${deck.slides.length} 页 → ${preview.pageCount} 页` +
-          `（新增 ${pageIds.join(" / ")}，只追加到末尾，既有页不动）。\n\n${diff || "(无文本差异)"}\n` +
+          `（新增 ${pageIds.join(" / ")}，只追加到末尾，既有页不动）。\n` +
+          `${duplicateNotes.length ? `\n⚠ 稿子里已经有同标题的页：${duplicateNotes.join(" / ")}。追加只新增、不替换也不移动——确认后会出现两套内容。如果目的是把已有页搬到末尾，请先跟用户说明当前还不能移动/删页，不要直接追加副本。\n` : ""}` +
+          `\n${diff || "(无文本差异)"}\n` +
           `请在 Chat 里确认；确认后才写 script revision + manifest。`,
+      };
+    }),
+  });
+
+  // ── 3.6 deck_script_insert_page ─────────────────────────────────────────────
+  tools.push({
+    name: "deck_script_insert_page",
+    description:
+      "在任意位置插入页（F-208：用户要「插到第 N 页之后 / 放在 P02 和 P03 之间」时用它）。" +
+      "`at` = 插到第 N 页之前（1-based；at = 当前页数+1 等价追加到末尾，那种情况优先用 deck_script_add_page）。" +
+      "生成 `### Pxx` 分节 + diff 并进入 waiting-user，用户确认后再用 deck_revision_confirm 落版。" +
+      "确认后 >= at 的页号整体后移 k 页，manifest 的 slide id/order 与 slides/<pageId>/versions 目录一起迁移——" +
+      "**已出的图跟着各自内容走，不需要整份重出**，绝对不要建议用户整份重出图。" +
+      "一次最多插 20 页。",
+    parameters: {
+      type: "object",
+      properties: {
+        deckId: { type: "string" },
+        at: { type: "number", description: "插到第 N 页之前（1-based）。P02 之后插入 → at=3；P01 之前（新开场）→ at=1" },
+        pages: {
+          type: "array",
+          description: "要插入的页（按顺序；必填，最多 20 页）",
+          items: {
+            type: "object",
+            properties: {
+              title: { type: "string" },
+              question: { type: "string" },
+              claim: { type: "string" },
+              body: { type: "string" },
+              visualBrief: { type: "string" },
+            },
+            additionalProperties: false,
+          },
+        },
+        reason: { type: "string", description: "为什么插在这里（写进 trace）" },
+      },
+      required: ["deckId", "at", "pages"],
+      additionalProperties: false,
+    },
+    output: { schema: { type: "object", properties: { proposalId: { type: "string" }, status: { type: "string" }, pageCount: { type: "number" } } }, render: (_args, value) => [{ type: "text", text: String(value?.text ?? "") }] },
+    execute: withToolEvent(store, "deck_script_insert_page", async (args, exec) => {
+      const adapter = adapterFor(args.deckId);
+      const deck = workspace.ensureDeck(adapter, { styleBrief: config.styleBrief });
+      const current = workspace.scriptCurrent(deck.id);
+      if (current == null) throw new Error(`script 工作副本缺失：${deck.id}`);
+      const explicit = Array.isArray(args.pages) ? args.pages.filter(Boolean) : [];
+      if (!explicit.length) throw new Error("插页需要 pages（至少一页：title / question / claim / body / visualBrief）");
+      if (explicit.length > 20) throw new Error("一次最多插入 20 页（更多请拆成两次提案）");
+      const preview = workspace.insertScriptPages(current, {
+        at: args.at,
+        pages: explicit.map((page) => ({
+          title: page?.title,
+          question: page?.question,
+          claim: page?.claim,
+          body: page?.body,
+          visualBrief: page?.visualBrief,
+        })),
+      });
+      const pageIds = preview.pages.map((spec) => `p${String(spec.page).padStart(2, "0")}`);
+      const diff = scriptDiff(current, preview.text);
+      const renumberLabel = preview.renumberedPages.length
+        ? `原 ${preview.renumberedPages.map((item) => `P${String(item.from).padStart(2, "0")}`).join(" / ")} 后移为 ${preview.renumberedPages.map((item) => `P${String(item.to).padStart(2, "0")}`).join(" / ")}`
+        : "没有页需要后移（插在末尾）";
+      // 插过页的 deck 里已经出过图的页，确认后会在 manifest 记上原始源页，源 baseline 图不错位。
+      const duplicateNotes = duplicateContentNotes(deck, preview.pages);
+      const pending = workspace.listProposals(deck.id, "waiting-user");
+      const pendingShifted = pending.filter((proposal) => Number(proposal.page) >= preview.at && proposal.kind !== "script-add-page" && proposal.kind !== "script-insert-page");
+      const proposal = {
+        proposalId: newProposalId(),
+        deckId: deck.id,
+        pageId: pageIds[0],
+        page: preview.pages[0].page,
+        pageIds,
+        kind: "script-insert-page",
+        field: "insert-page",
+        at: preview.at,
+        shift: preview.shift,
+        before: "",
+        after: preview.text,
+        // 和追加页一致：插页没有「单字段纯值」，value 留空。
+        value: "",
+        pages: preview.pages,
+        renumberedPages: preview.renumberedPages,
+        pageCountBefore: deck.slides.length,
+        pageCountAfter: preview.pageCount,
+        diff,
+        reason: String(args.reason ?? ""),
+        status: "waiting-user",
+        createdAt: proposalNow(),
+        sessionId: sessionIdOf(exec),
+        ...(duplicateNotes.length ? { duplicatePages: duplicateNotes } : {}),
+      };
+      workspace.saveProposal(proposal);
+
+      const task = store.taskCreate({
+        kind: "edit",
+        deckId: deck.id,
+        slideIds: pageIds,
+        actor: "agent",
+        sessionId: proposal.sessionId,
+        inputRefs: [`script:${deck.id}#insert-page@P${String(preview.at).padStart(2, "0")}`],
+      });
+      store.taskUpdate(task.taskId, { status: "running", actor: "agent" });
+      store.taskUpdate(task.taskId, {
+        status: "waiting-user",
+        actor: "agent",
+        inputRefs: [`script:${deck.id}#insert-page@P${String(preview.at).padStart(2, "0")}`, `proposal:${proposal.proposalId}`],
+      });
+      store.recordEvent({
+        type: "deck.edit",
+        sessionId: proposal.sessionId,
+        taskId: task.taskId,
+        deckId: deck.id,
+        slideIds: pageIds,
+        actor: "agent",
+        status: "waiting-user",
+        payload: { proposalId: proposal.proposalId, field: "insert-page", at: preview.at, shift: preview.shift, reason: proposal.reason, diff, pages: preview.pages.map((spec) => spec.page) },
+      });
+
+      return {
+        proposalId: proposal.proposalId,
+        taskId: task.taskId,
+        deckId: deck.id,
+        slideIds: pageIds,
+        status: "waiting-user",
+        pageCount: preview.pageCount,
+        at: preview.at,
+        shift: preview.shift,
+        diff,
+        text:
+          `插入页提案 ${proposal.proposalId} 已进入 waiting-user：${deck.slides.length} 页 → ${preview.pageCount} 页` +
+          `（插到 P${String(preview.at).padStart(2, "0")} 之前，新增 ${pageIds.join(" / ")}；${renumberLabel}）。\n` +
+          `${duplicateNotes.length ? `\n⚠ 稿子里已经有同标题的页：${duplicateNotes.join(" / ")}。插页是新增副本、不会替换或移动它们——确认后会出现两套内容。如果目的是把已有页搬到这里，请先跟用户说明当前还不能移动/删页，不要直接插重复页。\n` : ""}` +
+          `确认后会迁移 slides/<pageId>/versions 目录——**已出的图跟着各自内容走，不需要重出整份**。` +
+          `${pendingShifted.length ? `\n另有 ${pendingShifted.length} 条待确认提案落在后移页上（${pendingShifted.map((item) => item.pageId).join(" / ")}），确认时会自动改到新页号。` : ""}` +
+          `\n\n${diff || "(无文本差异)"}\n` +
+          `请在 Chat 里确认；确认后才写 script revision + manifest + 目录迁移。`,
       };
     }),
   });
@@ -1065,7 +1228,7 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
       "对 waiting-user 的提案执行用户裁决。confirmed=true 表示用户已确认（Chat 明确同意或工作台点了确认）；" +
       "confirmationQuote 引用用户原话最好，没带也能落版（会标 quoteMissing 留痕）——不要为了凑原话反复问用户；" +
       "写入 script revision（copy-on-write，不覆盖旧版）并同步 manifest。" +
-      "确认支持脚本字段（含 body 正文）与 visualBrief / 追加页；confirmed=false 记为用户驳回。",
+      "确认支持脚本字段（含 body 正文）与 visualBrief / 追加页 / 插页；confirmed=false 记为用户驳回。",
     parameters: {
       type: "object",
       properties: {
@@ -3401,7 +3564,9 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
           }
         }
         if (!sourceFile) {
-          const baseline = adapter.sourceImages?.()[slide.id];
+          // F-208：插过页的 deck 按原始源页取 baseline（sourcePage），否则会盖到源里同号那页的图上。
+          const sourceKey = workspace.sourcePageKey(deckId, slide.id);
+          const baseline = sourceKey ? adapter.sourceImages?.()[sourceKey] : null;
           if (baseline?.ext === ".png") {
             sourceFile = baseline.path;
             sourceRevision = "source";

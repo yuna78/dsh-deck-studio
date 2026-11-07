@@ -85,8 +85,8 @@
       },
       "versions": [
         {
-          "version": "0.2.27",
-          "publishTimestamp": 1794034872,
+          "version": "0.2.28",
+          "publishTimestamp": 1794070449,
           "source": {
             "type": "npm",
             "registry": "https://registry.npmmirror.com"
@@ -96,7 +96,7 @@
           }
         },
         {
-          "version": "0.2.27",
+          "version": "0.2.28",
           "publishTimestamp": 1793972906,
           "source": {
             "type": "npm",

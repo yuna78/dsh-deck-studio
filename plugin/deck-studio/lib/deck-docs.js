@@ -27,6 +27,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statS
 import { join } from "node:path";
 
 import { parseFrontmatter } from "./source-adapter.js";
+import { slideSourcePage } from "./deck-workspace.js";
 
 /* ------------------------------------------------------------------ *
  * 文档规格
@@ -585,19 +586,23 @@ export function resolveDeckDocs({ adapter, deckDir, render = {}, revisions = [],
       // F-110：画面要求（visualBrief）住在工作副本 manifest 里，不是源 prompts/Pxx.txt。
       // 以前只数 prompts/ 文件，新建 deck 永远显示「提示词覆盖 0/10」，把 Agent 和人都误导成「不能出图」。
       const manifest = readManifestJson(deckDir);
-      const briefOf = (page) => {
-        const pageId = `p${String(page.page).padStart(2, "0")}`;
-        const slide = (manifest?.slides ?? []).find((item) => item.id === pageId);
-        return String(slide?.visualBrief ?? "").trim();
-      };
-      const covered = pages.filter((page) => {
-        const pageId = `p${String(page.page).padStart(2, "0")}`;
-        const brief = briefOf(page);
-        const fieldPrompt = String(page.fields?.["提示词"] ?? "").trim();
-        return (brief && !isPlaceholder(brief)) || promptIds.includes(pageId) || (fieldPrompt && !isPlaceholder(fieldPrompt));
-      });
+      const manifestSlides = Array.isArray(manifest?.slides) ? manifest.slides : [];
+      // F-209：页数 / 画面要求覆盖率按 manifest 算（manifest 才有插页/追加后的完整页序）。
+      const covered = manifestSlides.length
+        ? manifestSlides.filter((slide) => {
+            const brief = String(slide.visualBrief ?? "").trim();
+            const sourcePage = slideSourcePage(slide);
+            const sourcePrompt = sourcePage != null ? prompts[`p${String(sourcePage).padStart(2, "0")}`] : "";
+            return (brief && !isPlaceholder(brief)) || (sourcePrompt && !isPlaceholder(sourcePrompt));
+          })
+        : pages.filter((page) => {
+            const pageId = `p${String(page.page).padStart(2, "0")}`;
+            const brief = String(manifest?.slides?.find((item) => item.id === pageId)?.visualBrief ?? "").trim();
+            const fieldPrompt = String(page.fields?.["提示词"] ?? "").trim();
+            return (brief && !isPlaceholder(brief)) || promptIds.includes(pageId) || (fieldPrompt && !isPlaceholder(fieldPrompt));
+          });
       doc.facts = {
-        pageCount: pages.length,
+        pageCount: manifestSlides.length || pages.length,
         promptCount: promptIds.length,
         promptCoverage: covered.length,
         // 故事线概览并入脚本页：分段表从 script 的 `## 段落 / 页码 / 任务` 解析，零副本。
@@ -867,24 +872,49 @@ export function readDeckDoc({ adapter, deckDir, docId, file = "", render = {}, r
     parsed.fields = doc.facts.fields;
     parsed.derived = doc.facts.derived;
   } else if (docId === "script") {
-    parsed.pages = pages.map((page) => {
-      const pageId = `p${String(page.page).padStart(2, "0")}`;
+    // F-209：页列表以 **manifest** 为准。插页/追加后的本地页在源 script 里可能没有对应分节
+    // （或源还停在原始页序）；按源 storyPages 枚举会缺页、串位（实测 25 页 deck 只显示 21 张卡）。
+    const manifestSlides = Array.isArray(readManifestJson(deckDir)?.slides) ? readManifestJson(deckDir).slides : [];
+    const sourceRowByPage = new Map(pages.map((page) => [page.page, page]));
+    const fromManifest = (slide) => {
+      const sourcePage = slideSourcePage(slide);
+      const row = sourcePage != null ? sourceRowByPage.get(sourcePage) : null;
+      const pageNo = Number(slide.order) || Number(String(slide.id ?? "").replace(/^p/i, "")) || 0;
+      const pageId = `p${String(pageNo).padStart(2, "0")}`;
       return {
         id: pageId,
-        page: page.page,
-        title: page.title,
-        subtitle: page.question,
-        claim: page.claim,
-        // F-108：正文既可能是 **正文** 字段行，也可能是标题行以下的散段；两处都取，
-        // 否则脚本页永远显示「（这页没有正文）」，用户在 UI 里看不到 Agent 写的内容。
-        content: [page.fields?.["正文"], page.content]
+        page: pageNo,
+        title: slide.title ?? row?.title ?? "",
+        subtitle: slide.question ?? row?.question ?? "",
+        claim: slide.claim ?? row?.claim ?? "",
+        // F-108：正文既可能是 manifest.body，也可能是源里 **正文** 字段 / 标题行以下散段。
+        content: [slide.body, row?.fields?.["正文"], row?.content]
           .map((part) => String(part ?? "").trim())
           .filter(Boolean)
           .join("\n\n"),
-        prompt: prompts[pageId] || page.fields?.["提示词"] || "",
-        source: page.source,
+        // 画面要求住在 manifest.visualBrief（F-110）；源 prompts 只作兜底（按原始源页取）。
+        prompt: String(slide.visualBrief ?? "").trim() || (sourcePage != null ? prompts[`p${String(sourcePage).padStart(2, "0")}`] : "") || row?.fields?.["提示词"] || "",
+        source: slide.source ?? row?.source ?? "manifest",
       };
-    });
+    };
+    parsed.pages = manifestSlides.length
+      ? manifestSlides.slice().sort((a, b) => (a.order ?? 0) - (b.order ?? 0)).map(fromManifest)
+      : pages.map((page) => {
+          const pageId = `p${String(page.page).padStart(2, "0")}`;
+          return {
+            id: pageId,
+            page: page.page,
+            title: page.title,
+            subtitle: page.question,
+            claim: page.claim,
+            content: [page.fields?.["正文"], page.content]
+              .map((part) => String(part ?? "").trim())
+              .filter(Boolean)
+              .join("\n\n"),
+            prompt: prompts[pageId] || page.fields?.["提示词"] || "",
+            source: page.source,
+          };
+        });
     parsed.segments = doc.facts.segments ?? [];
   } else if (docId === "design") {
     parsed.rules = doc.facts.rules;

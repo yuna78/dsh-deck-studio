@@ -619,6 +619,47 @@ div[data-sidebar-collapsed]{grid-template-columns:0px minmax(0px,1fr) 0px!import
         );
       }
 
+      /**
+       * 会话行尾悬停按钮（`sidebar.workspaces.session.row.action`）：
+       * 点一下就把它绑定的 deck / 设计在 Deckline 打开——比"先点行开对话、再点 ⋯ 菜单"少两步。
+       * 宿主会拦掉点击不让它触发行选中，所以这里也显式 stopPropagation。
+       */
+      function OpenDecklineRowAction({ sessionId }) {
+        const [busy, setBusy] = React.useState(false);
+        const onOpen = (event) => {
+          event?.preventDefault?.();
+          event?.stopPropagation?.();
+          if (busy) return;
+          setBusy(true);
+          void openSessionInWorkbench(sessionId).finally(() => setBusy(false));
+        };
+        return h(
+          "button",
+          {
+            type: "button",
+            title: "在 Deckline 打开",
+            "aria-label": "在 Deckline 打开",
+            "data-deck-studio-row-open": "",
+            disabled: busy,
+            onClick: onOpen,
+            style: {
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              width: 22,
+              height: 22,
+              padding: 0,
+              border: 0,
+              background: "transparent",
+              color: "var(--dsw-alias-label-secondary, var(--dsw-alias-label-primary))",
+              borderRadius: "var(--dsw-radius-sm)",
+              cursor: busy ? "default" : "pointer",
+            },
+          },
+          h(DeckGlyph, { size: 14 }),
+        );
+      }
+
       const currentSessionId = () => {
         try {
           const raw = window.localStorage.getItem("dsh.sessions.current");
@@ -673,14 +714,23 @@ div[data-sidebar-collapsed]{grid-template-columns:0px minmax(0px,1fr) 0px!import
 
       /* 工作台 iframe → 宿主：把一条完整 prompt 发进当前会话的原生 Chat。 */
       ctx.effect(() => {
-        const sendToChat = async (text) => {
-          const sessionId = currentSessionId();
-          if (!sessionId) throw new Error("no current session");
-          return sendToSession(sessionId, text);
+        /**
+         * F-211：优先用工作台指定的会话。
+         *
+         * 以前只按 `dsh.sessions.current` 发——那是宿主主区（or web iframe）的当前会话。
+         * 桌面 Dock 模式（F-202B / ADR-0027）下，工作台左栏显示的是 `dsh-deck-studio:chat-session`
+         * 报上来的 deck 绑定会话，两者经常不是同一个：指令落进隔壁会话，界面却提示已发送。
+         * 2026-11-07 真机：指令进了未绑定的 session-a274e455，绑定的 session-e2eda8c9 什么都没收到。
+         */
+        const sendToChat = async (text, sessionId) => {
+          const target = String(sessionId ?? "").trim() || currentSessionId();
+          if (!target) throw new Error("no current session");
+          return sendToSession(target, text);
         };
         const onMessage = (event) => {
           if (event?.data?.type !== "dsh-deck-studio:prompt") return;
           const text = String(event.data.text ?? "");
+          const sessionId = String(event.data.sessionId ?? "").trim();
           if (!text.trim()) return;
           const reply = (payload) => {
             try {
@@ -689,8 +739,8 @@ div[data-sidebar-collapsed]{grid-template-columns:0px minmax(0px,1fr) 0px!import
               /* 跨窗口失效就忽略 */
             }
           };
-          sendToChat(text)
-            .then((sessionId) => reply({ ok: true, sessionId }))
+          sendToChat(text, sessionId)
+            .then((sentTo) => reply({ ok: true, sessionId: sentTo }))
             .catch((error) => {
               ctx.logger?.warn?.("deck-studio: prompt bridge failed", error);
               reply({ ok: false, reason: String(error?.message ?? error) });
@@ -732,10 +782,53 @@ div[data-sidebar-collapsed]{grid-template-columns:0px minmax(0px,1fr) 0px!import
           .filter((item) => normalize(path) === normalize(item.path) || normalize(path).startsWith(`${normalize(item.path)}/`))
           .sort((a, b) => b.path.length - a.path.length)[0];
         const register = async (path) => {
-          const workspace = await workspaces.create({ path });
-          if (!workspace?.workspaceId) throw new Error("工作区创建未返回 workspaceId");
-          return workspace.workspaceId;
+          // 0.2.28：`workspaces.create()` 的成功返回值是 `{ workspace, created }`（服务端 HTTP 契约就是
+          // `workspaceView(...)` 包一层）；以前直接读 `.workspaceId`，永远 undefined → 抛错 → 建会话失败。
+          // html-deck 那边一直是 `result.workspace ?? result` 再取 `workspaceId ?? id`，所以它没这问题。
+          const created = await workspaces.create({ path });
+          const row = created?.workspace ?? created;
+          const workspaceId = row?.workspaceId ?? row?.id;
+          if (!workspaceId) throw new Error("工作区创建未返回 workspaceId（返回：" + JSON.stringify(created)?.slice(0, 200) + "）");
+          return workspaceId;
         };
+        const title = String(data.title ?? "").trim().slice(0, 60);
+        const desiredName = title ? `Deckline · ${title}` : "";
+        /**
+         * 给「deck 自己的工作区」命名（F-210）：侧栏要能一眼看出这是哪本 deck。
+         * 重名 / rename 失败只影响侧栏文案，绝不能让建会话失败（html-deck 同款容错）。
+         */
+        const nameDeckWorkspace = async (workspaceId) => {
+          if (!desiredName || typeof workspaces.rename !== "function") return workspaceId;
+          try {
+            const snapshot = workspaces.list?.getSnapshot?.();
+            const rows = snapshot?.phase === "ready" ? snapshot.items ?? [] : items;
+            const taken = rows.some((item) => String(item.name ?? "") === desiredName && (item.workspaceId ?? item.id) !== workspaceId);
+            if (!taken) await workspaces.rename(workspaceId, desiredName);
+          } catch {
+            /* 名字冲突 / 权限问题：会话照建 */
+          }
+          return workspaceId;
+        };
+        /**
+         * 0.2.16 / F-210：**deck 自己的项目目录排第一**。
+         * 以前它排在 cwd / sourceRoot 之后，源目录挂在一个更大的工作区下时永远轮不到它——
+         * 于是会话落进「sharing」这种大工作区，侧栏永远看不到以 deck 命名的项目。
+         */
+        const projectPath = String(data.sessionWorkspacePath ?? "").trim();
+        if (projectPath) {
+          const exact = items.find((item) => normalize(item.path) === normalize(projectPath));
+          const exactId = exact?.workspaceId ?? exact?.id;
+          if (exactId) return nameDeckWorkspace(exactId);
+          try {
+            return nameDeckWorkspace(await register(projectPath));
+          } catch (error) {
+            // 建不了（路径非法 / 落在别的工作区里 / 权限）：退回父工作区，至少别让「开对话」失败。
+            const parent = containing(projectPath);
+            ctx.logger?.warn?.(`deck-studio: 建 deck 工作区失败（${projectPath}）：${error?.message ?? error}${parent ? "；退回父工作区" : ""}`);
+            if (parent?.workspaceId ?? parent?.id) return parent.workspaceId ?? parent.id;
+            throw error;
+          }
+        }
         const configured = String(data.workspacePath ?? "").trim();
         if (configured) return register(configured);
         const cwd = String(data.cwd ?? "").trim();
@@ -754,28 +847,6 @@ div[data-sidebar-collapsed]{grid-template-columns:0px minmax(0px,1fr) 0px!import
         const sourceRoot = String(data.sourceRoot ?? "").trim();
         const sourceWorkspace = sourceRoot ? containing(sourceRoot) : null;
         if (sourceWorkspace) return sourceWorkspace.workspaceId;
-        /**
-         * 0.2.16：deck 自己的项目目录（工作台载荷里的 sessionWorkspacePath）。
-         * 桌面宿主里上面几级会全落空——cwd 是 profile 目录被守卫挡掉、源目录还没登记成工作区、
-         * 客户端 workspaces 服务也没有 initializeDefault——结果是「从没有会话的 deck」
-         * 永远建不出会话、也就永远绑不上（点了 ＋ 没反应）。这里按 deck 项目目录建/复用工作区，
-         * 保证每本 deck 都有落点；工作区名只是侧栏文案，命名失败不影响建会话。
-         */
-        const projectPath = String(data.sessionWorkspacePath ?? "").trim();
-        if (projectPath) {
-          const existing = containing(projectPath);
-          if (existing) return existing.workspaceId;
-          const projectWorkspaceId = await register(projectPath);
-          const title = String(data.title ?? "").trim().slice(0, 60);
-          if (title && typeof workspaces.rename === "function") {
-            try {
-              await workspaces.rename(projectWorkspaceId, `Deckline · ${title}`);
-            } catch {
-              /* 工作区重名等失败只影响侧栏文案，会话照建 */
-            }
-          }
-          return projectWorkspaceId;
-        }
         const fallback = await workspaces.initializeDefault?.();
         if (fallback?.workspaceId) return fallback.workspaceId;
         throw new Error("无法确定启动工作区，未创建会话；请配置 workspacePath 后重试");
@@ -1033,6 +1104,32 @@ div[data-sidebar-collapsed]{grid-template-columns:0px minmax(0px,1fr) 0px!import
 
         // 唯一入口：侧栏面板行「Deckline」（与 plugins / schedules 等插件同一种形态，带图标）；
         // → 对话用工作台里的「← 回到对话」。
+        // 会话行「⋯」菜单 + 行尾悬停按钮：**不放进 hasRightbar / selectPanel 分支**。
+        // 这两个 slot 是宿主可选契约（旧 DSH 没有就只记一条警告）；但一旦被右栏服务门禁包住，
+        // 桌面宿主没加载 sidebar-right 时菜单会整个消失——用户看到的效果就是「点会话没反应」。
+        try {
+          ctx.effect(
+            () => ctx.slots.inject("sidebar.workspaces.session.menu.item", () =>
+              ctx.slots.register({
+                name: "sidebar.workspaces.session.menu.item",
+                id: "dsh-plugin-deck-studio.open-binding",
+                order: 150,
+              }, OpenDecklineMenuItem)),
+            "deck-studio: session menu entry",
+          );
+          ctx.effect(
+            () => ctx.slots.inject("sidebar.workspaces.session.row.action", () =>
+              ctx.slots.register({
+                name: "sidebar.workspaces.session.row.action",
+                id: "dsh-plugin-deck-studio.open-binding-row",
+                order: 150,
+              }, OpenDecklineRowAction)),
+            "deck-studio: session row action",
+          );
+        } catch (error) {
+          ctx.logger?.warn?.(`deck-studio: session menu slot unavailable: ${error?.message ?? error}`);
+        }
+
         if (hasRightbar) {
           if (layout?.selectPanel) {
             ctx.effect(
@@ -1040,21 +1137,6 @@ div[data-sidebar-collapsed]{grid-template-columns:0px minmax(0px,1fr) 0px!import
                 ctx.slots.register({ name: "sidebar.panellist", id: WORKBENCH_KEY, order: 46, label: () => "Deckline" }, DeckGlyph)),
               "deck-studio: workbench sidebar entry",
             );
-            // 会话行「⋯」菜单：把当前会话绑定的 deck 在工作台里打开（未绑定给可见提示）。
-            // 该槽位是宿主可选契约，旧版本没有时只记一条警告，不能影响面板本身注册。
-            try {
-              ctx.effect(
-                () => ctx.slots.inject("sidebar.workspaces.session.menu.item", () =>
-                  ctx.slots.register({
-                    name: "sidebar.workspaces.session.menu.item",
-                    id: "dsh-plugin-deck-studio.open-binding",
-                    order: 150,
-                  }, OpenDecklineMenuItem)),
-                "deck-studio: session menu entry",
-              );
-            } catch (error) {
-              ctx.logger?.warn?.(`deck-studio: session menu slot unavailable: ${error?.message ?? error}`);
-            }
           }
           ctx.logger?.info?.("deck-studio client: workbench-only mode");
         } else {

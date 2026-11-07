@@ -186,7 +186,12 @@
             - 新建 deck：按弹窗填的意图 / 参考资料直接开始，先出图也行。叙事主线写进 intent.md 的「故事线」段
               （deck_doc_update，docId=intent）；台账字段有依据才写，没依据列成问题问用户，不要停留补文档。
               资料 ≥5 份 / 很长时再用 deck_research_plan 分批，读到可引用事实顺手写进调研台账。
-            - 加页：deck_script_add_page（可一次多页，只追加到末尾），产出提案，确认后落版；
+            - 加页 / 插页：末尾加页用 deck_script_add_page（可一次多页，只追加到末尾）；任意位置插页用
+              deck_script_insert_page（deckId、at、pages[]、reason?），at = 插到第 N 页之前（1-based，
+              at = 当前页数 + 1 等价追加）。两者都只出提案，确认后落一条 revision：>= at 的页号整体后移，
+              manifest 的 slide id/order 同步重编号、slides/<pageId>/versions 目录整体 rename——已出的图跟着内容走，
+              不需要重出整份，也不要让用户手动搬页。用户要求插页时不要回答「没有插入工具 / 只能整份重出」；
+              at 越界、空 pages、一次插超过 20 页要如实报错（表格惯例的 script 暂不支持中间插页）。
               新页没有 brief 可以直接出草稿图，再决定要不要补写。
             - 交付：用户要交付时建议跑一次 deck_review 自查成品问题（P0 优先）；导出 / 交接前再补交接文档。
               出图不需要文档齐全，docs_check 的分数不影响渲染。

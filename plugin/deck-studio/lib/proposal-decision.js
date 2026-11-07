@@ -12,7 +12,7 @@
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { SCRIPT_FIELD_CELL, proposalNow, scriptSectionRange } from "./deck-workspace.js";
+import { SCRIPT_FIELD_CELL, pageIdFromNumber, pageNumberFromId, proposalNow, scriptSectionRange } from "./deck-workspace.js";
 import { commitFiles } from "./git-commit.js";
 import { isFirstDraft, writeAutoland } from "./first-draft.js";
 
@@ -28,7 +28,7 @@ export function createScriptToSourceSync({ adapters = [], isLocalDeck = null } =
     if (!sourceRoot || !existsSync(sourceRoot)) return null;
     const file = join(sourceRoot, "script.md");
     writeFileSync(file, scriptText.endsWith("\n") ? scriptText : `${scriptText}\n`, "utf8");
-    const label = proposal?.kind === "script-add-page" ? "追加页" : "改稿";
+    const label = proposal?.kind === "script-add-page" ? "追加页" : proposal?.kind === "script-insert-page" ? "插页" : "改稿";
     const git = commitFiles({ dir: sourceRoot, files: [file], message: `deck(${deckId})：${label}回写 script` });
     return { path: file, ok: git?.ok === true, commit: git?.commit ?? null, error: git?.ok ? null : git?.error ?? "git 未提交" };
   };
@@ -119,6 +119,108 @@ export function syncAddPageManifest(workspace, proposal, appliedPages) {
 }
 
 /**
+ * 插页提案 → manifest 重编号 + 新页入表 + `slides/<pageId>/versions` 目录后移（F-208）。
+ *
+ * 顺序很重要：**先迁目录、再写 manifest**，所以下面先调 `workspace.shiftSlideDirs`
+ * （它内部失败会回滚已 rename 的目录），manifest 写盘在最后。这样任何一步抛错，
+ * 都不会出现「manifest 指向一个不存在的版本目录」的半截状态。
+ *
+ * slide 上补 `sourcePage`（原始源页号）：源 baseline 图按它取，插页改号不会让源图错位；
+ * 插页新增的页 `sourcePage: null`（源里没有 baseline 图，别去源里抓一张别人的图）。
+ */
+export function syncInsertPageManifest(workspace, proposal, applied) {
+  const deck = workspace.manifest(proposal.deckId);
+  if (!deck) throw new Error(`manifest 缺失：${proposal.deckId}`);
+  const slides = Array.isArray(deck.slides) ? deck.slides : [];
+  const atPage = Number(applied.at);
+  const shift = Number(applied.shift) || (applied.pages?.length ?? 0);
+  if (!Number.isInteger(atPage) || atPage < 1 || !Number.isInteger(shift) || shift < 1) {
+    throw new Error(`插页参数无效：at=${applied.at} shift=${applied.shift}`);
+  }
+  const oldCover = slides.find((slide) => Number(slide.order) === 1 && slide.type === "cover") ?? null;
+
+  // 1) 目录跟着内容后移（.deck/.../slides/p03 → p05 …）
+  const moved = workspace.shiftSlideDirs(deck.id, { fromPage: atPage, shift });
+
+  // 2) manifest 重编号：id 与 order 一起改，并把「原始源页」记到 sourcePage（只在第一次改号时记）。
+  const renumbered = slides.map((slide) => {
+    const order = Number(slide.order);
+    if (!(order >= atPage)) return slide;
+    const next = { ...slide, order: order + shift, id: pageIdFromNumber(order + shift) };
+    if (!Object.prototype.hasOwnProperty.call(slide, "sourcePage")) next.sourcePage = order;
+    return next;
+  });
+
+  // 3) 新页入表：插到第 1 页之前时，封面身份交给新页（老封面降级为 story，保持「一本只有一个封面」）。
+  // 占位判断用**重编号之后**的 id：新页要占的号原本属于被后移的页，那不是冲突。
+  const occupiedIds = new Set(renumbered.map((slide) => slide.id));
+  const inserted = (applied.pages ?? []).map((spec, index) => {
+    const pageId = pageIdFromNumber(spec.page);
+    if (occupiedIds.has(pageId)) {
+      throw new Error(`manifest 已有 ${pageId}，拒绝重复插入（manifest 与脚本页号不一致；先核对 deck.json 或跑 deck_script_repair 体检）`);
+    }
+    const takesCover = atPage === 1 && index === 0 && oldCover != null;
+    return {
+      id: pageId,
+      order: spec.page,
+      type: takesCover ? "cover" : "story",
+      title: spec.title,
+      question: spec.question,
+      claim: spec.claim,
+      source: "script.md",
+      asset: null,
+      visualBrief: spec.visualBrief,
+      // 源里没有这一页 → 没有 baseline 图；显式 null 防止回退到同号源页的图。
+      sourcePage: null,
+      inserted: true,
+    };
+  });
+  deck.slides = [...renumbered, ...inserted].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  if (atPage === 1 && oldCover != null) {
+    // 老封面整体后移到 1+shift，降级成 story（新第一页接管封面）。
+    const demoted = deck.slides.find((slide) => Number(slide.order) === 1 + shift && slide.type === "cover");
+    if (demoted) demoted.type = "story";
+  }
+  workspace.saveManifest(deck);
+  return { moved, fromPage: atPage, shift, insertedIds: inserted.map((slide) => slide.id) };
+}
+
+/**
+ * 插页确认后，把落在被后移页上的**待确认提案**改到新页号（F-208）。
+ * 不改就全落错页：提案里存的是旧 page/pageId，而工作副本已经重编号。
+ * 追加页 / 插页提案带自己的页号语义，不动（它们在落版时按当前脚本重算）。
+ */
+export function remapProposalsAfterInsert(workspace, deckId, { fromPage, shift, skipIds = [] }) {
+  const remapped = [];
+  for (const proposal of workspace.listProposals(deckId, "waiting-user")) {
+    if (skipIds.includes(proposal.proposalId)) continue;
+    if (proposal.kind === "script-add-page" || proposal.kind === "script-insert-page") continue;
+    const oldPage = Number(proposal.page);
+    const oldPageIds = Array.isArray(proposal.pageIds) ? proposal.pageIds : [];
+    const pageShifted = Number.isFinite(oldPage) && oldPage >= fromPage;
+    const idsShifted = oldPageIds.some((id) => {
+      const page = pageNumberFromId(id);
+      return page != null && page >= fromPage;
+    });
+    if (!pageShifted && !idsShifted) continue;
+    const patch = { renumberedAfterInsert: { from: oldPage, shift } };
+    if (pageShifted) {
+      patch.page = oldPage + shift;
+      patch.pageId = pageIdFromNumber(oldPage + shift);
+    }
+    if (oldPageIds.length) {
+      patch.pageIds = oldPageIds.map((id) => {
+        const page = pageNumberFromId(id);
+        return page != null && page >= fromPage ? pageIdFromNumber(page + shift) : id;
+      });
+    }
+    workspace.updateProposal(proposal, patch);
+    remapped.push({ proposalId: proposal.proposalId, from: proposal.pageId, to: patch.pageId ?? proposal.pageId });
+  }
+  return remapped;
+}
+
+/**
  * 批量落版（F-176 / 智力升级 I-18）：把一批 script 提案合成**一条** revision。
  * 首稿自动落版（F-173）与用户「接受并更新」勾选批次共用这一段，保证两条路径的写入语义一致。
  */
@@ -129,9 +231,13 @@ function landProposalBatch({ store, workspace, proposals, decidedBy, quote = "",
   for (const proposal of list) {
     if (proposal.deckId !== deckId) throw new Error("批量落版只处理同一个 deck 的提案");
     if (proposal.status !== "waiting-user") throw new Error(`提案 ${proposal.proposalId} 状态为 ${proposal.status}，只有 waiting-user 可落版`);
-    if (proposal.kind !== "script" && proposal.kind !== "script-add-page" && proposal.kind !== "manifest") {
-      throw new Error(`批量落版不支持 ${proposal.kind} 类提案（只支持 script 正文 / 追加页 / visualBrief）`);
+    if (proposal.kind !== "script" && proposal.kind !== "script-add-page" && proposal.kind !== "script-insert-page" && proposal.kind !== "manifest") {
+      throw new Error(`批量落版不支持 ${proposal.kind} 类提案（只支持 script 正文 / 追加页 / 插页 / visualBrief）`);
     }
+  }
+  // F-208：插页会让后面的页号整体后移；和别的提案混批时，那些提案里的 page 已经对不上工作副本。
+  if (list.some((proposal) => proposal.kind === "script-insert-page") && list.length > 1) {
+    throw new Error("插页提案要单独确认：它会让后面的页号整体后移，和别的提案混批会落到错页。请先单独确认插页提案，再处理其它提案。");
   }
   const current = workspace.scriptCurrent(deckId);
   if (current == null) throw new Error(`script 工作副本缺失：${deckId}`);
@@ -148,6 +254,15 @@ function landProposalBatch({ store, workspace, proposals, decidedBy, quote = "",
       slide.visualBriefDesign = proposal.writtenUnderDesign ?? null;
       workspace.saveManifest(deck);
       manifestTouched = true;
+      continue;
+    }
+    if (proposal.kind === "script-insert-page") {
+      const applied = workspace.insertScriptPages(text, { at: proposal.at, pages: proposal.pages ?? [] });
+      if (!applied.pages.length) throw new Error(`提案 ${proposal.proposalId} 没有可插入的页`);
+      text = applied.text;
+      syncInsertPageManifest(workspace, proposal, applied);
+      remapProposalsAfterInsert(workspace, deckId, { fromPage: applied.at, shift: applied.shift, skipIds: [proposal.proposalId] });
+      proposal.pageCountAfter = applied.pageCount;
       continue;
     }
     if (proposal.kind === "script-add-page") {
@@ -274,8 +389,8 @@ export function decideProposal({ store, workspace, proposal, confirmed, quote = 
   // 判定放在这里（而不是 Agent 侧）：Agent 说错话也落不了有历史版本的稿子。
   const wantAutoland = autoland != null;
   if (wantAutoland) {
-    if (proposal.kind !== "script" && proposal.kind !== "script-add-page") {
-      throw new Error("自动落版只用于 script 内容（正文 / 追加页）；visualBrief 这类仍走提案确认。");
+    if (proposal.kind !== "script" && proposal.kind !== "script-add-page" && proposal.kind !== "script-insert-page") {
+      throw new Error("自动落版只用于 script 内容（正文 / 追加页 / 插页）；visualBrief 这类仍走提案确认。");
     }
     if (!isFirstDraft(workspace, proposal.deckId)) {
       throw new Error(`首稿自动落版被拒：${proposal.deckId} 已有已落版 revision。自动落版只用于第一次落库，这次请等用户确认后再落。`);
@@ -310,6 +425,22 @@ export function decideProposal({ store, workspace, proposal, confirmed, quote = 
       `append ${applied.pages.length} page(s) ${applied.pages.map((spec) => `P${String(spec.page).padStart(2, "0")}`).join(" ")} by user confirmation (${proposal.proposalId})`,
     );
     syncAddPageManifest(workspace, proposal, applied.pages);
+    proposal.pageCountAfter = applied.pageCount;
+    appliedScriptText = applied.text;
+  } else if (proposal.kind === "script-insert-page") {
+    // F-208：插页 = 重编号 + 目录迁移。和追加页一样基于**当前**工作副本重算，避免提案后被别的
+    // revision 改过而覆盖；manifest / 目录 / 待确认提案的页号一起迁，已出的图跟着内容走。
+    const current = workspace.scriptCurrent(proposal.deckId);
+    if (current == null) throw new Error(`script 工作副本缺失：${proposal.deckId}`);
+    const applied = workspace.insertScriptPages(current, { at: proposal.at, pages: proposal.pages ?? [] });
+    if (!applied.pages.length) throw new Error(`提案 ${proposal.proposalId} 没有可插入的页`);
+    const synced = syncInsertPageManifest(workspace, proposal, applied);
+    revisionInfo = workspace.saveScriptRevision(
+      proposal.deckId,
+      applied.text,
+      `insert ${applied.pages.length} page(s) before P${String(applied.at).padStart(2, "0")}; ${synced.moved.length} page dir(s) shifted by ${applied.shift} by user confirmation (${proposal.proposalId})`,
+    );
+    remapProposalsAfterInsert(workspace, proposal.deckId, { fromPage: applied.at, shift: applied.shift, skipIds: [proposal.proposalId] });
     proposal.pageCountAfter = applied.pageCount;
     appliedScriptText = applied.text;
   } else {
@@ -357,7 +488,7 @@ export function decideProposal({ store, workspace, proposal, confirmed, quote = 
     slideIds: affectedSlideIds,
     actor: autolandRecord ? "agent" : "user",
     status: "succeeded",
-    payload: { proposalId: proposal.proposalId, outcome: "applied", confirmationQuote, quoteMissing, revision: revisionInfo?.revision ?? null, revisionPath: revisionInfo?.path ?? null, ...(autolandRecord ? { autoland: true, selfReview: autolandRecord.selfReview, draftRound: autolandRecord.draftRound } : {}), ...(sourceSync ? { sourceSync } : {}), ...(proposal.kind === "script-add-page" ? { field: "add-page", pages: proposal.pageIds, pageCountAfter: proposal.pageCountAfter ?? null } : {}) },
+    payload: { proposalId: proposal.proposalId, outcome: "applied", confirmationQuote, quoteMissing, revision: revisionInfo?.revision ?? null, revisionPath: revisionInfo?.path ?? null, ...(autolandRecord ? { autoland: true, selfReview: autolandRecord.selfReview, draftRound: autolandRecord.draftRound } : {}), ...(sourceSync ? { sourceSync } : {}), ...(proposal.kind === "script-add-page" ? { field: "add-page", pages: proposal.pageIds, pageCountAfter: proposal.pageCountAfter ?? null } : {}), ...(proposal.kind === "script-insert-page" ? { field: "insert-page", pages: proposal.pageIds, at: proposal.at ?? null, pageCountAfter: proposal.pageCountAfter ?? null } : {}) },
   });
 
   return {

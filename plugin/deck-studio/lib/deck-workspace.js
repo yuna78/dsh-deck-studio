@@ -8,15 +8,47 @@
  * @module dsh-plugin-deck-studio/deck-workspace
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, renameSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { createLocalSourceAdapter } from "./source-adapter.js";
 import { nowIso, makeId } from "./store.js";
 import { lineDiff } from "./diff.js";
+import { stripVisualBriefScaffolding } from "./render.js";
 
 /** script 表格行里可编辑字段 → 单元格下标。 */
 export const SCRIPT_FIELD_CELL = { title: 1, question: 2, claim: 3 };
+
+/** `p07` → 7；非法返回 null。 */
+export function pageNumberFromId(pageId) {
+  const page = Number(String(pageId ?? "").replace(/^p/i, ""));
+  return Number.isFinite(page) && page > 0 ? page : null;
+}
+
+/** 页号 → `p07`。 */
+export function pageIdFromNumber(page) {
+  return `p${String(Number(page)).padStart(2, "0")}`;
+}
+
+/**
+ * slide 对应的**原始源页号**（F-208 插页后 manifest 会记 `sourcePage`）。
+ * 源 baseline 图（`outputs/full/final/P0N.png`）按原始源页映射：插页改了页号，
+ * 但这页的源图还是原来那张，不能跟着改号。
+ * - 老 manifest 没有该字段 → 按 order（插页前的行为和现在一致）。
+ * - 显式 `sourcePage: null` → 这页是插页新增的，源里没有 baseline 图。
+ */
+export function slideSourcePage(slide) {
+  if (!slide || typeof slide !== "object") return null;
+  if (Object.prototype.hasOwnProperty.call(slide, "sourcePage")) {
+    const raw = slide.sourcePage;
+    // 显式 null / undefined 都表示「源里没有这页」（插页新增）；不能走 Number(null)=0。
+    if (raw == null || raw === "") return null;
+    const page = Number(raw);
+    return Number.isFinite(page) && page > 0 ? page : null;
+  }
+  const order = Number(slide.order);
+  return Number.isFinite(order) && order > 0 ? order : null;
+}
 
 /** 新值里的竖线与换行会破坏表格结构，替换为全角安全字符。 */
 export function sanitizeCell(value) {
@@ -165,7 +197,12 @@ export function createDeckWorkspace(config) {
   function saveManifest(deck) {
     const dir = deckDir(deck.id);
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "deck.json"), `${JSON.stringify(deck, null, 2)}\n`, "utf8");
+    // F-209：多实例共享同一个 .deck 时，半截 deck.json 会被 manifest() 当成「没有 manifest」，
+    // ensureDeck 于是按源静默重建、把插页/追加的本地页丢掉。写入走 tmp + rename（同目录原子替换）。
+    const file = join(dir, "deck.json");
+    const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+    writeFileSync(tmp, `${JSON.stringify(deck, null, 2)}\n`, "utf8");
+    renameSync(tmp, file);
   }
 
   /** 从源初始化 manifest + script 工作副本（幂等：已存在不覆盖）。 */
@@ -188,7 +225,9 @@ export function createDeckWorkspace(config) {
         body: String(row.fields?.["正文"] ?? "").trim(),
         asset: yamlPages[row.page - 1] ?? null,
         // 源里已写好的 image prompt（prompts/P01.txt）直接作为 visualBrief 起点。
-        visualBrief: prompts[pageId] ?? "",
+        // F-209：源 prompt 是完整独立 prompt，含 `### P02 · 标题` 这类分页标题；原样拼进出图 prompt
+        // 会被模型当图上文字印出来（实测页顶出现「##P2」），导入时先做最小清洗。
+        visualBrief: stripVisualBriefScaffolding(prompts[pageId] ?? ""),
       };
     });
   }
@@ -208,31 +247,62 @@ export function createDeckWorkspace(config) {
     return pages;
   }
 
+  /** 一页的分节 script 文本块（追加 / 插页共用）。 */
+  function scriptPageBlock(spec) {
+    const pageNo = spec.page;
+    const title = spec.title || `待补章节 ${pageNo}`;
+    return [
+      `### P${String(pageNo).padStart(2, "0")} · ${title}`,
+      `**标题**：${title}`,
+      `**副标题**：${spec.question || "这一页回答什么（待补）"}`,
+      `**主张**：${spec.claim || "（待补：这页要证明的判断）"}`,
+      `**正文**：${spec.body || "（待补：3–5 句正文）"}`,
+      `**提示词**：${spec.visualBrief || "（待补：visualBrief）"}`,
+    ].join("\n");
+  }
+
   /**
-   * 追加页到 script 工作副本（F-99）。只追加到最后一个正文页之后（附录前）：
-   * 页号 = 当前最大页号 + 1..N，不重排既有页——重排会让 slides/<pageId>/versions、
-   * asset URL、proposal.pageId 跟着错配（那需要迁目录，另有 ADR 再谈）。
-   * 同时把 frontmatter 的 `pages:` 计数改成新页数，保证元数据与正文一致。
+   * 规格化新页（追加 / 插页共用）。页号**永远按当前位置重算**，不信调用方存的旧页号：
+   * 提案存放期间如果又落了别的 revision（比如先插页、再确认之前提的追加页），旧页号会和现页撞车。
    */
-  function appendScriptPages(scriptText, pages) {
-    const text = String(scriptText ?? "");
-    const lines = text.split("\n");
-    const existing = scriptPageNumbers(text);
-    const startPage = (existing.length ? Math.max(...existing) : 0) + 1;
-    const specs = (Array.isArray(pages) ? pages : []).map((page, offset) => ({
-      page: Number(page?.page) > 0 ? Number(page.page) : startPage + offset,
+  function normalizeNewPageSpecs(pages, startPage) {
+    return (Array.isArray(pages) ? pages : []).map((page, offset) => ({
+      page: startPage + offset,
       title: String(page?.title ?? "").trim(),
       question: String(page?.question ?? "").trim(),
       claim: String(page?.claim ?? "").trim(),
       body: String(page?.body ?? "").trim(),
       visualBrief: String(page?.visualBrief ?? "").trim(),
     }));
-    if (!specs.length) throw new Error("appendScriptPages：没有要追加的页");
+  }
+
+  /** 在 `insertAt` 行之前塞入新页块，并修掉前后多余空行（追加 / 插页共用）。 */
+  function splicePageBlocks(lines, insertAt, specs) {
+    const head = lines.slice(0, insertAt);
+    while (head.length && head[head.length - 1].trim() === "") head.pop();
+    const tail = lines.slice(insertAt);
+    while (tail.length && tail[0].trim() === "") tail.shift();
+    const nextLines = [...head];
+    for (const spec of specs) {
+      if (nextLines.length) nextLines.push("");
+      nextLines.push(scriptPageBlock(spec));
+    }
+    if (tail.length) {
+      nextLines.push("");
+      nextLines.push(...tail);
+    }
+    let next = nextLines.join("\n");
+    const pageCount = scriptPageNumbers(next).length;
+    next = next.replace(/^pages:\s*\d+\s*$/m, `pages: ${pageCount}`);
+    return { text: next, pageCount };
+  }
+
+  /** 追加位置：最后一个正文页之后（`## 附录` 之类的一级/二级小节之前）。 */
+  function appendInsertLine(lines) {
     let lastPageLine = -1;
     lines.forEach((line, index) => {
       if (SCRIPT_PAGE_HEAD.test(line)) lastPageLine = index;
     });
-    // 最后一个正文页之后若出现一级/二级小节（如 `## 附录`），插到它前面。
     let insertAt = lines.length;
     if (lastPageLine >= 0) {
       for (let index = lastPageLine + 1; index < lines.length; index += 1) {
@@ -242,33 +312,125 @@ export function createDeckWorkspace(config) {
         }
       }
     }
-    const head = lines.slice(0, insertAt);
-    while (head.length && head[head.length - 1].trim() === "") head.pop();
-    const tail = lines.slice(insertAt);
-    while (tail.length && tail[0].trim() === "") tail.shift();
-    const nextLines = [...head];
-    for (const spec of specs) {
-      const pageNo = spec.page;
-      const title = spec.title || `待补章节 ${pageNo}`;
-      const block = [
-        `### P${String(pageNo).padStart(2, "0")} · ${title}`,
-        `**标题**：${title}`,
-        `**副标题**：${spec.question || "这一页回答什么（待补）"}`,
-        `**主张**：${spec.claim || "（待补：这页要证明的判断）"}`,
-        `**正文**：${spec.body || "（待补：3–5 句正文）"}`,
-        `**提示词**：${spec.visualBrief || "（待补：visualBrief）"}`,
-      ].join("\n");
-      if (nextLines.length) nextLines.push("");
-      nextLines.push(block);
+    return insertAt;
+  }
+
+  /**
+   * 追加页到 script 工作副本（F-99）。只追加到最后一个正文页之后（附录前），不重排既有页。
+   * 同时把 frontmatter 的 `pages:` 计数改成新页数，保证元数据与正文一致。
+   */
+  function appendScriptPages(scriptText, pages) {
+    const text = String(scriptText ?? "");
+    const lines = text.split("\n");
+    const existing = scriptPageNumbers(text);
+    const startPage = (existing.length ? Math.max(...existing) : 0) + 1;
+    const specs = normalizeNewPageSpecs(pages, startPage);
+    if (!specs.length) throw new Error("appendScriptPages：没有要追加的页");
+    const spliced = splicePageBlocks(lines, appendInsertLine(lines), specs);
+    return { ...spliced, startPage, pages: specs };
+  }
+
+  /**
+   * 插页到 script 工作副本（F-208）。`at` = 插到第 N 页之前（1-based；at = 最大页号+1 等价追加）。
+   *
+   * 与追加的差别：插页会让 >= at 的页号整体后移 `pages.length` 页——脚本标题行、manifest 的
+   * slide id/order、以及 `.deck/.../slides/<pageId>/versions` 目录都必须一起迁（见
+   * `shiftSlideDirs` 与 proposal-decision 的 `syncInsertPageManifest`）。**已出的图跟着内容走**，
+   * 不需要重出整份（ADR-0028）。
+   *
+   * 纯函数：只算新文本，不写盘；调用方负责 revision / manifest / 目录迁移。
+   */
+  function insertScriptPages(scriptText, { at, pages } = {}) {
+    const text = String(scriptText ?? "");
+    if (!text.trim()) throw new Error("插页失败：script 工作副本为空");
+    const lines = text.split("\n");
+    const existing = scriptPageNumbers(text);
+    if (!existing.length) {
+      throw new Error("插页只支持分节惯例的 script（`### Pxx · 标题`）；这份 deck 是表格惯例，暂不支持在中间插页——可以用 deck_script_add_page 追加，或先确认是否要改成分节惯例。");
     }
-    if (tail.length) {
-      nextLines.push("");
-      nextLines.push(...tail);
+    const maxPage = Math.max(...existing);
+    const atPage = Number(at);
+    if (!Number.isInteger(atPage) || atPage < 1) {
+      throw new Error(`插页位置无效：at=${at}（要插到第 N 页之前，N 从 1 开始）`);
     }
-    let next = nextLines.join("\n");
-    const pageCount = scriptPageNumbers(next).length;
-    next = next.replace(/^pages:\s*\d+\s*$/m, `pages: ${pageCount}`);
-    return { text: next, pageCount, startPage, pages: specs };
+    if (atPage > maxPage + 1) {
+      throw new Error(`插页位置超界：当前 ${maxPage} 页，at 最大是 ${maxPage + 1}（= 追加到末尾，也可以直接用 deck_script_add_page）`);
+    }
+    const specs = normalizeNewPageSpecs(pages, atPage);
+    if (!specs.length) throw new Error("insertScriptPages：没有要插入的页");
+    const shift = specs.length;
+
+    // 插入行 = 第一个页号 >= at 的标题行；at = max+1 时退回「末尾 / 附录前」的锚点。
+    let insertAt = -1;
+    for (let index = 0; index < lines.length; index += 1) {
+      const match = lines[index].match(SCRIPT_PAGE_HEAD);
+      if (match && Number(match[1]) >= atPage) {
+        insertAt = index;
+        break;
+      }
+    }
+    if (insertAt < 0) insertAt = appendInsertLine(lines);
+
+    // 后移：插入点之后、页号 >= at 的标题行 +shift（保留 `###` 层级与标题，只改页号）。
+    const renumbered = lines.map((line, index) => {
+      if (index < insertAt) return line;
+      const match = line.match(SCRIPT_PAGE_HEAD);
+      if (!match) return line;
+      const page = Number(match[1]);
+      if (!(page >= atPage)) return line;
+      return line.replace(/^(#{2,3}\s*P)0*(\d+)/, (match, prefix) => `${prefix}${String(page + shift).padStart(2, "0")}`);
+    });
+
+    const spliced = splicePageBlocks(renumbered, insertAt, specs);
+    return {
+      ...spliced,
+      at: atPage,
+      shift,
+      pages: specs,
+      // 被后移的旧页：旧页号 → 新页号（manifest / 目录 / 提案按这个映射迁）
+      renumberedPages: existing.filter((page) => page >= atPage).map((page) => ({ from: page, to: page + shift })),
+    };
+  }
+
+  /**
+   * 插页时把 `slides/<pageId>/versions` 目录整体后移（F-208）。
+   * 从大到小 rename，避免目标目录已存在互相覆盖；中途失败回滚已迁的目录，保持工作区干净。
+   * 返回 [{ fromId, toId }]。
+   */
+  function shiftSlideDirs(deckId, { fromPage, shift } = {}) {
+    const from = Number(fromPage);
+    const step = Number(shift);
+    if (!Number.isInteger(from) || from < 1) throw new Error(`shiftSlideDirs：fromPage 无效（${fromPage}）`);
+    if (!Number.isInteger(step) || step < 1) throw new Error(`shiftSlideDirs：shift 无效（${shift}）`);
+    const slidesDir = join(deckDir(deckId), "slides");
+    if (!existsSync(slidesDir)) return [];
+    const entries = readdirSync(slidesDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && /^p\d+$/.test(entry.name))
+      .map((entry) => ({ id: entry.name, page: Number(entry.name.slice(1)) }))
+      .filter((entry) => entry.page >= from)
+      .sort((left, right) => right.page - left.page);
+    const moved = [];
+    try {
+      for (const entry of entries) {
+        const toId = `p${String(entry.page + step).padStart(2, "0")}`;
+        const target = join(slidesDir, toId);
+        if (existsSync(target)) {
+          throw new Error(`插页迁移冲突：${target} 已存在（目录与 manifest 不一致；先核对 slides/ 与 deck.json，或跑 deck_script_repair 体检）`);
+        }
+        renameSync(join(slidesDir, entry.id), target);
+        moved.push({ fromId: entry.id, toId });
+      }
+    } catch (error) {
+      for (const item of [...moved].reverse()) {
+        try {
+          renameSync(join(slidesDir, item.toId), join(slidesDir, item.fromId));
+        } catch {
+          /* 回滚尽力而为；原始错误更重要 */
+        }
+      }
+      throw error;
+    }
+    return moved;
   }
 
   /**
@@ -299,6 +461,12 @@ export function createDeckWorkspace(config) {
   function ensureDeck(adapter, { styleBrief, forceRebuild = false } = {}) {
     let deck = manifest(adapter.id);
     const scriptFile = join(deckDir(adapter.id), "script", "current.md");
+    const manifestFile = join(deckDir(adapter.id), "deck.json");
+    // F-209：deck.json 存在但 JSON 坏了 ≠ 新 deck。以前会当 null → 按源重建 manifest，
+    // 插页/追加的本地页静默消失（script 还是 25 页）。宁可报错让人先备份/修复。
+    if (!deck && existsSync(manifestFile)) {
+      throw new Error(`manifest 损坏，拒绝按源重建（会丢插页/追加页）：${manifestFile}；先备份并修复 deck.json（或从 script/revisions 重建），再打开这本 deck。`);
+    }
     if (!deck) {
       const view = adapter.overview();
       deck = {
@@ -322,29 +490,66 @@ export function createDeckWorkspace(config) {
         const view = adapter.overview();
         const rebuilt = slidesFromSource(adapter);
         const previous = Array.isArray(deck.slides) ? deck.slides : [];
-        const byId = new Map(previous.map((slide) => [slide.id, slide]));
-        // 源里有的页：字段以源为准，但保留本地已填的 visualBrief（manifest-only，源里没有）。
-        const merged = rebuilt.map((slide) => {
-          const local = byId.get(slide.id);
-          if (!local || !String(local.visualBrief ?? "").trim()) return slide;
+        // F-208：插过页之后 manifest 的 id/order 已经重编号，和源页号不再一一对应。
+        // 对齐键取决于源是不是本地脚本的镜像：
+        // - 本机 deck 确认后会把 script 回写源（ADR-0022），源的「第 N 页」= 本地第 N 页（含插页）
+        //   → 按 id 对齐；用 sourcePage 反而会把插入页当成「源里没有的页」重复插一遍。
+        // - 受控客户源永远停在原始页序 → 按 slide.sourcePage（原始源页）对齐，避免 Inspector 保存
+        //   （forceRebuild）把后移过的页弄丢或重复。
+        // 判据是「源的页号语义 == 本地页号语义」，不是「文本一模一样」：
+        // Inspector 保存（savePage）只写源 script.md、不写本地 current.md（有 revision 时源不覆盖本地），
+        // 两份文本会立刻不相等——但页号集合仍一致，仍该按 id 对齐。受控源插页后源仍是原始页数，集合不同，
+        // 才按 slide.sourcePage 对齐。所以只比页号序列。
+        const localScriptText = readFileSafe(scriptFile);
+        const sourceScriptText = typeof adapter.readScriptRaw === "function" ? adapter.readScriptRaw() : null;
+        const pageNumbersOfText = (text) => [...String(text ?? "").matchAll(/^#{2,3}\s*P(\d+)/gm)].map((match) => Number(match[1]));
+        const localPageNumbers = pageNumbersOfText(localScriptText);
+        const sourcePageNumbers = pageNumbersOfText(sourceScriptText);
+        const sourceMirrorsLocal = localPageNumbers.length > 0
+          && localPageNumbers.length === sourcePageNumbers.length
+          && localPageNumbers.every((page, index) => page === sourcePageNumbers[index]);
+        const alignPageOf = (slide) => (sourceMirrorsLocal ? pageNumberFromId(slide.id) : slideSourcePage(slide));
+        const byAlignedPage = new Map();
+        for (const slide of previous) {
+          const sourcePage = alignPageOf(slide);
+          if (sourcePage != null && !byAlignedPage.has(sourcePage)) byAlignedPage.set(sourcePage, slide);
+        }
+        // 源里有的页：字段以源为准，但保留本地 id/order、原始源页标记与 local-only 的 visualBrief。
+        const merged = rebuilt.map((row) => {
+          const local = byAlignedPage.get(row.order);
+          if (!local) return row;
           // F-121：重建 manifest 时 visualBrief 是「本地才有的字段」，必须连写作风格一起保住；
           // 只留 visualBrief 会把 provenance 冲掉，脚本页就全变成「brief 风格未记录」。
-          return {
-            ...slide,
-            visualBrief: local.visualBrief,
-            ...(local.visualBriefDesign ? { visualBriefDesign: local.visualBriefDesign } : {}),
-          };
+          const next = { ...row, id: local.id, order: local.order };
+          if (Object.prototype.hasOwnProperty.call(local, "sourcePage")) next.sourcePage = local.sourcePage;
+          if (String(local.visualBrief ?? "").trim()) {
+            next.visualBrief = local.visualBrief;
+            if (local.visualBriefDesign) next.visualBriefDesign = local.visualBriefDesign;
+          }
+          return next;
         });
-        // 源里没有的页 = 本地追加页（F-99 deck_script_add_page）。重建 manifest 时不能丢，
+        // 源里没有的页 = 本地追加 / 插入页（F-99 / F-208）。重建 manifest 时不能丢，
         // 否则 Inspector 一保存（forceRebuild）就把 6→10 页打回 6 页。
-        const extras = previous.filter((slide) => !rebuilt.some((candidate) => candidate.id === slide.id));
+        const extras = previous.filter((slide) => {
+          const sourcePage = alignPageOf(slide);
+          return sourcePage == null || !rebuilt.some((row) => row.order === sourcePage);
+        });
+        // 兜底：源与本地都改过时可能撞出重复 id，宁可保守去重（保留先出现的那条），也不能一本 deck 两份 p07。
+        const seenIds = new Set();
+        const slides = [...merged, ...extras]
+          .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+          .filter((slide) => {
+            if (!slide?.id || seenIds.has(slide.id)) return false;
+            seenIds.add(slide.id);
+            return true;
+          });
         deck = {
           ...deck,
           title: view.title,
           status: view.status || deck.status,
           sourceSignature: signature,
           buildWarnings: view.warnings,
-          slides: [...merged, ...extras].sort((a, b) => (a.order ?? 0) - (b.order ?? 0)),
+          slides,
           appendix: { count: view.appendixCount ?? 0, rows: view.appendixRows ?? [] },
         };
         saveManifest(deck);
@@ -368,10 +573,20 @@ export function createDeckWorkspace(config) {
       const rows = adapter.storyPages();
       for (const slide of current.slides) {
         if (String(slide.body ?? "").trim()) continue;
-        const row = rows.find((item) => `p${String(item.page).padStart(2, "0")}` === slide.id);
+        const sourcePage = slideSourcePage(slide);
+        const row = rows.find((item) => item.page === sourcePage);
         const body = String(row?.fields?.["正文"] ?? "").trim();
         if (body) {
           slide.body = body;
+          changed = true;
+        }
+      }
+      // F-209：已落盘的旧 manifest 里 visualBrief 可能还是「源 prompt 原样」（含 `### P02` 分页标题）。
+      // 只删结构标题行、别的一字不动；改一次就够（下次比较不再变化）。
+      for (const slide of current.slides) {
+        const cleaned = stripVisualBriefScaffolding(slide.visualBrief);
+        if (cleaned !== String(slide.visualBrief ?? "")) {
+          slide.visualBrief = cleaned;
           changed = true;
         }
       }
@@ -483,7 +698,27 @@ export function createDeckWorkspace(config) {
     ensureDeck,
     scriptCurrent,
     appendScriptPages,
+    insertScriptPages,
+    shiftSlideDirs,
     scriptPageNumbers,
+    /** 某页对应的原始源页号（源 baseline 图映射；页不存在返回 null）（F-208）。 */
+    sourcePageOf(deckId, pageId) {
+      const deck = manifest(deckId);
+      const slide = deck?.slides?.find((candidate) => candidate.id === pageId);
+      return slide ? slideSourcePage(slide) : null;
+    },
+    /**
+     * 源 baseline 图的 key（`p03`）：按 slide 的原始源页取，插页重编号不会挂错图。
+     * 页不在 manifest 时按传入 id 原样返回（导航/预览会直接拿源页号查）；
+     * 返回 null = 这页是插页新增的，源里没有 baseline 图。
+     */
+    sourcePageKey(deckId, pageId) {
+      const deck = manifest(deckId);
+      const slide = deck?.slides?.find((candidate) => candidate.id === pageId);
+      if (!slide) return pageId;
+      const page = slideSourcePage(slide);
+      return page == null ? null : pageIdFromNumber(page);
+    },
     saveScriptRevision,
     listScriptRevisions,
     saveProposal,

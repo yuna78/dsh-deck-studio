@@ -79,6 +79,87 @@ export function onImageText(slide) {
   };
 }
 
+/**
+ * 源 deck 完整 prompt 的脚手架清洗（F-209）。
+ * 源 `prompts/Pnn.txt` 是「STYLE + LAYOUT AND EXACT TEXT（含标题/正文）+ LAYOUT VISUALS + BOTTOM TAKEAWAY」
+ * 的完整独立 prompt（导入时原样进了 manifest.visualBrief）。原样拼进出图 prompt 时：
+ * - `### P02 · 标题` 会被模型当图上文字印出来（事故：页顶出现 `##P2`，p05 还出现 `P03 · …` 徽章）；
+ * - `STYLE:` / `LAYOUT AND EXACT TEXT:` / `**标题**：` 这些脚手架也可能被换个形式画到图上。
+ * 只删脚手架，**内容一字不动**（受控源 deck 的 manifest.body 常为空，图上正文来自这些内容段，
+ * 删内容会丢整页正文）。未识别成完整源 prompt 的文本（用户自己写的画面要求、单行 STYLE）原样返回：
+ * 幂等、零误伤。实测一本 21 页受控源 deck 的 p04：1005 → 295 字符（出图 prompt 1517 → 829）。
+ * @param {string} value
+ * @returns {string}
+ */
+export function stripVisualBriefScaffolding(value) {
+  const text = String(value ?? "").replace(/\r\n/g, "\n");
+  if (!text.trim()) return "";
+  const lines = text.split("\n");
+  // 只有「像完整源 prompt」时才洗；单行 STYLE / 用户自写画面要求一律不动（smoke 契约）。
+  const looksLikeSourcePrompt = lines.some((line) => {
+    const t = line.trim();
+    return /^LAYOUT AND EXACT TEXT\s*[:：]?\s*$/i.test(t)
+      || /^PAGE CONTENT\b/i.test(t)
+      || /^LAYOUT VISUALS\b/i.test(t)
+      || /^BOTTOM TAKEAWAY\s*[:：]/i.test(t)
+      || /^LAYOUT GUARD\s*[:：]/i.test(t)
+      || /^#{1,6}\s*P\d+\b/.test(t)
+      || /^TITLE, the largest\b/i.test(t);
+  });
+  if (!looksLikeSourcePrompt) return text.trim();
+
+  const MD_PAGE_HEAD = /^\s{0,3}#{1,6}\s*P\d+\b.*$/;
+  const STYLE_START = /^STYLE\s*[:：]/i;
+  const EXACT_HEAD = /^LAYOUT AND EXACT TEXT\s*[:：]?\s*$/i;
+  const ENGLISH_FIELD_HEADS = [/^PAGE CONTENT\b/i, /^LAYOUT VISUALS\b/i, /^LAYOUT GUARD\b/i];
+  const TAKEAWAY_HEAD = /^(?:BOTTOM TAKEAWAY|页脚收口)\s*[:：]\s*(.*)$/i;
+  const FIELD = /^\*\*([^*]+)\*\*\s*[：:]\s*(.*)$/;
+  const DROP_FIELDS = new Set(["标题", "副标题", "讲述意图", "页面内容", "正文", "画面说明"]);
+  const EN_TITLE_LINE = /^(TITLE|SUBTITLE)\b[^:：]*[:：]\s*「?(.*?)」?\s*$/i;
+  const EN_TAKEAWAY = /^BOTTOM TAKEAWAY\s*[:：]\s*(.*)$/i;
+
+  const kept = [];
+  let inStyle = false;
+  for (const rawLine of lines) {
+    const line = rawLine.replace(/\s+$/, "");
+    const t = line.trim();
+    if (!t) {
+      inStyle = false;
+      kept.push("");
+      continue;
+    }
+    if (STYLE_START.test(t)) {
+      inStyle = true;
+      continue;
+    }
+    if (inStyle) continue;
+    if (MD_PAGE_HEAD.test(t)) continue;
+    if (EXACT_HEAD.test(t)) continue;
+    if (ENGLISH_FIELD_HEADS.some((rx) => rx.test(t))) continue;
+    if (EN_TITLE_LINE.test(t)) continue;
+    const enTake = EN_TAKEAWAY.exec(t);
+    if (enTake) {
+      kept.push(`页脚通栏一句：「${enTake[1].trim()}」`);
+      continue;
+    }
+    const field = FIELD.exec(t);
+    if (field) {
+      const name = field[1].trim();
+      if (DROP_FIELDS.has(name)) continue;
+      const value = field[2].trim();
+      kept.push(value ? `${name}：${value}` : `${name}：`);
+      continue;
+    }
+    const take = TAKEAWAY_HEAD.exec(t);
+    if (take) {
+      kept.push(`页脚通栏一句：「${take[1].trim()}」`);
+      continue;
+    }
+    kept.push(line);
+  }
+  return kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 const ON_IMAGE_HEAD = "【这一页必须在画面上印出的文字：逐字照排，不要改写、翻译、缩写或省略】";
 /** 反装饰：图例 / 清单面板 / 英文角标这类「看起来专业但跟本页无关」的元素，模型最容易凭空造。 */
 const CANVAS_DISCIPLINE =
@@ -112,11 +193,12 @@ export function buildPrompt(slide, styleBrief, context = {}) {
   const brief = context.brief ?? {};
   const list = onImageText(slide);
   const isCover = slide?.type === "cover" || Number(slide?.order) === 1;
+  const visualBrief = stripVisualBriefScaffolding(slide?.visualBrief);
   if (isCover) {
     const parts = [styleBrief, "封面页（16:9）：只放标题信息", ...onImageLines({ ...list, bullets: [] })];
     parts.push(...coverPromptLines(brief));
     parts.push("版式纪律：只放主标题 / 副标题 / 作者 / 日期；正文不超过一行；不要目录、要点清单、数据图表、大段文字；留白为主。");
-    if (slide?.visualBrief) parts.push(`画面要求：${slide.visualBrief}`);
+    if (visualBrief) parts.push(`画面要求：${visualBrief}`);
     parts.push(CANVAS_DISCIPLINE);
     parts.push("文字优先：上面【图上文字】的每一行都必须出现在画面里；画面要求与它冲突时，以上面为准。");
     return parts.filter(Boolean).join("\n");
@@ -124,7 +206,7 @@ export function buildPrompt(slide, styleBrief, context = {}) {
   const parts = [styleBrief, ...onImageLines(list)];
   const body = String(slide?.body ?? "").trim();
   if (body) parts.push(`讲述用正文（不要整段排进画面，只提炼成上面的要点；用来把握语气与例子）：${body.slice(0, 300)}`);
-  if (slide?.visualBrief) parts.push(`画面要求：${slide.visualBrief}`);
+  if (visualBrief) parts.push(`画面要求：${visualBrief}`);
   parts.push(CANVAS_DISCIPLINE);
   parts.push("文字优先：上面【图上文字】的主标题 / 副标题 / 主张必须完整印出（可换行、可分层，但不得省略、不得改写成别的说法）；画面要求若写「只出现 XX」，XX 之外仍要保留这三项与要点短语。");
   parts.push(...briefPromptLines(brief));

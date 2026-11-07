@@ -36,7 +36,7 @@ import { appendSampleRecord, readSampleRecords, readStyleDefinition, writeStyleD
 import { resolveMediaFile, scanDesignStyles, scanResources } from "./lib/home-catalog.js";
 import { defaultSelection, renderModelPayload, resolveSelection } from "./lib/render-nodes.js";
 import { applyRenderSettings, readRenderSettings, renderSettingsPayload, saveRenderSettings } from "./lib/render-settings.js";
-import { buildPrompt, editEndpointFor, selectRenderer } from "./lib/render.js";
+import { buildPrompt, editEndpointFor, selectRenderer, stripVisualBriefScaffolding } from "./lib/render.js";
 import { PDF_IMPORT_MAX_PAGES, applyImportedTitles, buildImportNote, extractIntentFields, headingsAsTitles, listImportDir, normalizeDpi, rasterizePdfToPng, scriptPagesFromMarkdown, titleFromPdfName } from "./lib/pdf-import.js";
 import { readDeckBrief } from "./lib/deck-brief.js";
 import { detectProfileDir, installModeOf, isNewer, latestFromRegistry, repoLinksOf } from "./lib/update-check.js";
@@ -1416,8 +1416,12 @@ export function createService(config, logger, env = process.env) {
     for (const pageId of pageIds.slice(0, 6)) {
       const info = slideRenderInfo(deckId, pageId);
       if (!info) continue;
+      // F-208：源 baseline 图按 slide 的原始源页取（插页重编号后 pageId ≠ 源页号）。
+      const sourceKey = workspace.sourcePageKey(deckId, pageId);
       const sourcePath = info.fromSource
-        ? sourceImages[pageId]?.path
+        ? sourceKey
+          ? sourceImages[sourceKey]?.path
+          : null
         : join(workspace.slideDir(deckId, pageId), "versions", info.revision, `image${info.ext}`);
       if (!sourcePath || !existsSync(sourcePath)) continue;
       const ext = String(info.ext ?? "png").replace(/^\./, "");
@@ -1851,7 +1855,45 @@ export function createService(config, logger, env = process.env) {
   function pageForEdit(deckId, pageId) {
     const adapter = adapterOf(deckId);
     if (!adapter?.available()) return null;
-    return pageEditView(adapter, pageId);
+    // F-209：插页重编号后「本地页号 ≠ 源页号」（本地 p04 的源是 P02）。逐页微调必须按
+    // slide.sourcePage 读源，否则 Inspector 显示的是源里同号那页（用户看到的「4、5 是以前的 4、5」）。
+    const deck = workspace.manifest(deckId);
+    const normalized = String(pageId ?? "").trim();
+    const pageNo = Number(normalized.replace(/^p/i, ""));
+    const slide = (deck?.slides ?? []).find(
+      (item) => item.id === normalized || (Number.isFinite(pageNo) && pageNo > 0 && item.order === pageNo),
+    );
+    if (!slide) return pageEditView(adapter, pageId);
+    // 本机新建 deck（ADR-0022）：源 script.md 是本地页序的镜像，sourcePage 只是 baseline 映射残留，
+    // 用本地页号才对应「源里同一内容」那一节；受控客户源停在原始页序，必须用 sourcePage。
+    const sourcePage = localDeckIds().has(deckId) ? Number(slide.order) : workspace.sourcePageOf(deckId, slide.id);
+    if (sourcePage == null) {
+      const order = Number(slide.order) || null;
+      return {
+        page: order,
+        pageId: slide.id,
+        unsupported: true,
+        reason: `P${String(order ?? 0).padStart(2, "0")} 是插页新增的页，源 script.md 里没有对应分节；逐页微调只能改源里已有的页。要改这页请让 Agent 用 deck_script_propose_edit 提案。`,
+      };
+    }
+    const view = pageEditView(adapter, `p${String(sourcePage).padStart(2, "0")}`);
+    if (!view) return null;
+    // 源里其实没有这一页分节（例如插页新增页被记了 baseline 映射、或源后来少了页）：
+    // 别把 pageEditView 的「表格惯例」原因甩给用户，明确说是源里没有这一节。
+    if (view.unsupported) {
+      const rawScript = typeof adapter.readScriptRaw === "function" ? String(adapter.readScriptRaw() ?? "") : "";
+      const sectionExists = new RegExp(`^#{2,3}\\s*P0*${sourcePage}\\b`, "m").test(rawScript);
+      if (!sectionExists) {
+        return {
+          ...view,
+          page: Number(slide.order) || view.page,
+          pageId: slide.id,
+          sourcePage,
+          reason: `源 script.md 里没有 P${String(sourcePage).padStart(2, "0")} 分节（这页是插页新增或源已更新），逐页微调不可用；改稿请让 Agent 用 deck_script_propose_edit 提案。`,
+        };
+      }
+    }
+    return { ...view, page: Number(slide.order) || view.page, pageId: slide.id, sourcePage, sourcePageId: view.pageId };
   }
 
   /**
@@ -1861,7 +1903,7 @@ export function createService(config, logger, env = process.env) {
   function pagePrompt(deckId, pageId) {
     const adapter = adapterOf(deckId);
     if (!adapter?.available()) return null;
-    const deck = workspace.manifest(deckId);
+    const deck = workspace.manifest(deckId) ?? workspace.ensureDeck(adapter, { styleBrief: config.styleBrief });
     const normalized = String(pageId ?? "").trim();
     const slide = (deck?.slides ?? []).find((item) => item.id === normalized || `p${String(item.order).padStart(2, "0")}` === normalized);
     if (!slide) return null;
@@ -1894,30 +1936,53 @@ export function createService(config, logger, env = process.env) {
   function savePage(deckId, pageId, patch) {
     const adapter = adapterOf(deckId);
     if (!adapter?.available()) throw new Error(`deck 不可用：${deckId}`);
-    const page = Number(String(pageId).replace(/^p/i, ""));
+    // F-209：写源必须用「原始源页号」而不是本地页号——插页重编号后两者不再相等，
+    // 按本地页号写会把内容写进源里同号的另一页（绑定层事故的根因之一）。
+    const manifestNow = workspace.manifest(deckId) ?? workspace.ensureDeck(adapter, { styleBrief: config.styleBrief });
+    const normalized = String(pageId ?? "").trim();
+    const pageNo = Number(normalized.replace(/^p/i, ""));
+    const slide = (manifestNow?.slides ?? []).find(
+      (item) => item.id === normalized || (Number.isFinite(pageNo) && pageNo > 0 && item.order === pageNo),
+    );
+    if (!slide) throw new Error(`页不存在：${pageId}`);
+    // 本机 deck 的源是本地页序镜像 → 用本地页号；受控客户源 → 用原始源页（F-209）。
+    const sourcePage = localDeckIds().has(deckId) ? Number(slide.order) : workspace.sourcePageOf(deckId, slide.id);
+    if (sourcePage == null) {
+      throw new Error(`P${String(slide.order).padStart(2, "0")} 是插页新增的页，源 script.md 里没有对应分节，不能直接写回源（会写错页）。要改这页请让 Agent 用 deck_script_propose_edit 提案。`);
+    }
     const result = savePageEdit({
       sourceRoot: adapter.sourceRoot,
-      page,
+      page: sourcePage,
       title: patch?.title ?? "",
       subtitle: patch?.subtitle ?? "",
       body: patch?.body ?? "",
       prompt: typeof patch?.prompt === "string" ? patch.prompt : undefined,
     });
     const deck = workspace.ensureDeck(adapter, { styleBrief: config.styleBrief, forceRebuild: true });
-    const message = `deck(${deckId})：微调 P${String(page).padStart(2, "0")}${patch?.title ? `「${String(patch.title).slice(0, 30)}」` : ""}`;
+    // 出图 prompt 来自 manifest.visualBrief；Inspector 改了提示词就要同步过去，否则「保存后重出」还是旧 prompt
+    // （forceRebuild 会保留本地 visualBrief，源 prompts 的改动进不来）。
+    if (typeof patch?.prompt === "string") {
+      const target = (deck?.slides ?? []).find((item) => item.id === slide.id);
+      if (target) {
+        target.visualBrief = stripVisualBriefScaffolding(patch.prompt);
+        workspace.saveManifest(deck);
+      }
+    }
+    const message = `deck(${deckId})：微调 P${String(slide.order).padStart(2, "0")}${patch?.title ? `「${String(patch.title).slice(0, 30)}」` : ""}`;
     const git = commitFiles({ dir: adapter.sourceRoot, files: result.files, message });
     store.recordEvent({
       type: "deck.script.save",
       deckId,
-      slideIds: [result.pageId],
+      slideIds: [slide.id],
       actor: "user",
       status: git.ok ? "succeeded" : "saved",
-      payload: { page: result.page, files: result.files, commit: git.commit ?? null, gitError: git.error ?? null },
+      payload: { page: Number(slide.order) || result.page, sourcePage, files: result.files, commit: git.commit ?? null, gitError: git.error ?? null },
     });
     return {
       deckId,
-      page: result.page,
-      pageId: result.pageId,
+      page: Number(slide.order) || result.page,
+      pageId: slide.id,
+      sourcePage,
       files: result.files.map((file) => file.replace(`${adapter.sourceRoot}/`, "")),
       commit: git.commit ?? null,
       gitOk: git.ok,
@@ -2029,7 +2094,9 @@ export function createService(config, logger, env = process.env) {
       const pageId = slide.id;
       const render = slideRenderInfo(deckId, pageId);
       const localFile = render ? assetFile(deckId, pageId, render.revision) : null;
-      const sourceFile = adapterOf(deckId)?.sourceImages?.()?.[pageId]?.path ?? null;
+      // F-208：源 baseline 图按原始源页取（插页重编号不影响）；插页新增的页没有源图。
+      const sourceKey = workspace.sourcePageKey(deckId, pageId);
+      const sourceFile = (sourceKey ? adapterOf(deckId)?.sourceImages?.()?.[sourceKey]?.path : null) ?? null;
       const file = localFile ?? sourceFile;
       if (!file) continue;
       const ext = extname(file).toLowerCase();
@@ -2339,15 +2406,21 @@ export function createService(config, logger, env = process.env) {
       }
     }
     // 2) 源里已出好的整页图作为 baseline（只读引用，不复制、不占双份空间）
-    const source = adapterOf(deckId)?.sourceImages?.()[pageId];
+    // F-208：插过页的 deck 按 slide.sourcePage（原始源页）取；插页重编号后若还按新 pageId 抓源图，
+    // 会把源里同号那页（别人的图）挂到这页上。
+    const sourceKey = workspace.sourcePageKey(deckId, pageId);
+    const source = sourceKey ? adapterOf(deckId)?.sourceImages?.()[sourceKey] : null;
     if (source) {
       return {
         revision: "source",
         ext: source.ext,
-        url: `${ROUTES.asset}?deckId=${encodeURIComponent(deckId)}&pageId=${encodeURIComponent(pageId)}&rev=source`,
+        // F-209：URL 带上解析后的源页（&sourcePage=p02）。插页前后 rev=source 的 URL 原本完全一样，
+        // 旧实例/旧 payload/旧缓存出的图和新的无法区分；带上源页后一眼能看出「这页取的是哪张源图」。
+        url: `${ROUTES.asset}?deckId=${encodeURIComponent(deckId)}&pageId=${encodeURIComponent(pageId)}&rev=source&sourcePage=${encodeURIComponent(sourceKey ?? "")}`,
         sizeBytes: source.sizeBytes,
         renderedAt: statSync(source.path).mtime.toISOString(),
         fromSource: true,
+        sourcePage: sourceKey ?? null,
       };
     }
     return null;
@@ -2389,7 +2462,8 @@ export function createService(config, logger, env = process.env) {
   /** 资产读取：只允许 versions/vNNN/image.<ext> 或源 baseline（rev=source），防目录穿越。 */
   function assetFile(deckId, pageId, revision) {
     if (revision === "source") {
-      const image = adapterOf(deckId)?.sourceImages?.()[pageId];
+      const sourceKey = workspace.sourcePageKey(deckId, pageId);
+      const image = sourceKey ? adapterOf(deckId)?.sourceImages?.()[sourceKey] : null;
       return image && existsSync(image.path) ? image.path : null;
     }
     if (!/^v\d+$/.test(revision ?? "")) return null;
@@ -2480,6 +2554,9 @@ export function createService(config, logger, env = process.env) {
           // ensureDeck 幂等：manifest 缺失时初始化；源变了且本地还没改过时按源刷新派生字段。
           deck = workspace.ensureDeck(adapter, { styleBrief: config.styleBrief });
         } catch (error) {
+          // F-209：manifest 损坏时不能吞掉错误退回「空 deck」（看起来像 0 页 / 像源 deck 丢了）。
+          // 明确抛给调用方（工作台报错、Agent 工具报错），让人先备份/修复 deck.json。
+          if (/manifest 损坏/.test(String(error?.message ?? error))) throw error;
           logger?.warn?.(`${name}: ensureDeck(${activeId}) 失败：${error?.message ?? error}`);
           deck = workspace.manifest(activeId);
         }
@@ -2513,6 +2590,8 @@ export function createService(config, logger, env = process.env) {
           visualBrief: slide.visualBrief ?? "",
           // F-114：这条画面要求写于哪个关联风格（换风格时 UI 标「旧风格 brief」）。
           visualBriefDesign: slide.visualBriefDesign ?? null,
+          // F-209：把「这页对应源 deck 的哪一页」暴露给工作台，插页重编号后排查错位不用猜。
+          sourcePage: workspace.sourcePageOf(activeId, slide.id),
           render: slideRenderInfo(activeId, slide.id),
         })),
         appendix: deck?.appendix ?? { count: view?.appendixCount ?? 0, rows: view?.appendixRows ?? [] },

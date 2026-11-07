@@ -1,5 +1,51 @@
 # Changelog
 
+## [0.2.28] · 2026-11-07
+
+> 用户想在中间插一页，Agent 说「必须完全重新输出」——因为产品只有末端追加，persona 也写着「只追加到末尾」。
+
+### 新增
+
+- **任意位置插页 `deck_script_insert_page`**（F-208 / ADR-0028）：`deckId / at / pages[] / reason?`；
+  `at` = 插到第 N 页之前（1-based，`at = 当前页数 + 1` 等价追加）。只出提案（`waiting-user`，
+  `kind=script-insert-page`），用户确认后落一条 revision：`>= at` 的页整体后移 `k`，
+  manifest 的 slide id/order 重编号、`slides/<pageId>/versions/` 整体 rename——已出的图跟着内容走，不用重出整份。
+- slide 记 `sourcePage`：受控客户源只读，源 baseline 图仍按原始源页取；落在后移页上的 `waiting-user` 提案按插入页数重映射。
+- 工作台「添加页面」可选插入位置（末尾 / 第 N 页之前），生成给 Agent 的指令；边界：`at` 越界 / 空 `pages` / 超 20 页报错。
+- persona（`cordis.patch.yml` / `cordis.example.yml`）与 FAQ 去掉「只追加、不插页」旧口径，
+  明确禁止回答「没有插入工具 / 必须整份重出」。
+
+### 修复（F-211 · 点「重新出图」的指令跑进了别的会话）
+
+- **桌面 Dock 下发指令带目标会话**：工作台「重新出图 / 发送到左侧对话」以前只把文本 postMessage 给宿主，
+  宿主按自己的 `dsh.sessions.current`（宿主主区会话）投递。桌面 Dock 模式（F-202B / ADR-0027）下，
+  左栏渲染的是 deck 绑定会话，两者经常不是同一个——于是弹层显示「已发送到左侧对话 ✓」，
+  左边对话什么也没有，指令在隔壁会话里跑掉了。现在工作台把 `sessionId` 一起送过去，宿主优先用它。
+- **落点不再靠猜**：宿主 ack 回实际投递的 `sessionId`；与工作台认定的会话不一致时如实提示
+  「已发送到另一个会话」，不再谎报成功。
+- **发送前先推 Dock 会话**：不等 1.2s 心跳，避免「消息已经到了、左侧还停在旧会话」。
+- **ack 超时 2.5s → 8s**：宿主要先 inject 会话上下文（最多 1.5s）再 send，2.5s 容易误报「宿主没回应」。
+
+### 修复（F-207 / F-209 / F-210）
+
+- **侧栏会话行点不开 deck**（F-207）：会话行「⋯」菜单的注册被 `hasRightbar && layout.selectPanel` 门禁包住，
+  桌面宿主没加载 sidebar-right 时整块跳过——用户体验就是「点会话没反应」（隔壁 HTML Deck 同能力一直是无条件注册）。
+  现在无条件注册，并新增会话行尾悬停按钮（`sidebar.workspaces.session.row.action`），点一下直接打开该会话绑定的 deck。
+- **会话没有以 deck 名分组**（F-210）：① 工作台 ensure 载荷补 `title`；② 解析顺序把 deck 自己的项目目录提到第一
+  （此前 `cwd` / `sourceRoot` 先命中父工作区就返回，deck 目录永远没机会登记）；③ 根因之三是宿主
+  `workspaces.create()` 返回 `{ workspace, created }`，旧代码直接读 `.workspaceId` 恒为 undefined → 整条 ensure 失败；
+  现在解包并兼容 `id`，建不了时退回父工作区并打 warn。工作区名 `Deckline · <deck 标题>`，只改 deck 自己目录的工作区。
+- **插页后的页序 / 源页映射 / 源 prompt 清洗**（F-209）：逐页微调按 `sourcePage` 读写源（本机 deck 按本地页号，
+  插页新增页返回 unsupported 并指向提案）；`stripVisualBriefScaffolding()` 在导入 / 拼 prompt / 旧 manifest 迁移三处
+  去掉 `### P02` 这类脚手架（内容一字不动、幂等）；`deck.json` 原子写 + 损坏拒绝静默重建；payload / asset URL 暴露
+  `sourcePage`；追加/插页提案发现同标题页时给重复警告。
+
+### 验证
+
+- smoke 133/133（含 F-208 插页 5 条、F-209 页序 / 清洗 5 条、F-211 会话落点 1 条、F-210 会话工作区 4 条：提案→确认重编号 / 目录迁移 / 图跟内容、`sourcePage` 源图映射、
+  `at = max + 1` 追加 + 回写源、边界拒绝、插页后 forceRebuild 不丢插页）；eval 新增 S25（`insert_page_applied`）与 chat-audit `insert-page` 场景（均待真机跑）；
+  `docs:check` / `harness-check` 见日志。
+
 ## [0.2.27] · 2026-11-06
 
 > 同一台机装了多个 DSH profile / 实例时，打开某本 deck 可能看到「正文和图片不在当前数据目录」的黄条，
