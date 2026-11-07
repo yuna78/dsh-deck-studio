@@ -232,6 +232,8 @@ function decksDirEmpty(dataRoot) {
 /** 冲突 warn 只打一次：5s 轮询与多次重建服务都不重复刷屏。 */
 let warnedDataRootConflict = false;
 let warnedProjectsRootConflict = false;
+/** 指针 vs profile 的冲突按「指针→profile」这一对去重：同一处冲突不刷屏，换了目录再提醒一次。 */
+const warnedPointerProfilePairs = new Set();
 
 export function resolveDataDir({ env = process.env, profileDataRoot = "", profileProjectsRoot = "", logger = null } = {}) {
   const envDataRoot = normalizeDirPath(env[DATA_DIR_ENV] ?? "", env);
@@ -253,6 +255,13 @@ export function resolveDataDir({ env = process.env, profileDataRoot = "", profil
   const pointerDataRoot = pointer.error || !isAbsolute(pointer.dataRoot) ? "" : pointer.dataRoot;
   const pointerProjectsRoot = pointer.error || !isAbsolute(pointer.projectsRoot) ? "" : pointer.projectsRoot;
 
+  // 指针（用户点「切到这个目录」写下的）优先级高于 profile；两者不一致时以前是**完全静默**的，
+  // 表现成「我这本 deck 怎么没了」。留一条 warn，日志里能找到是谁把目录换掉的。
+  const pointerProfileKey = pointerDataRoot && profileRoot && pointerDataRoot !== profileRoot ? `${pointerDataRoot}→${profileRoot}` : "";
+  if (warn && pointerProfileKey && !warnedPointerProfilePairs.has(pointerProfileKey)) {
+    warnedPointerProfilePairs.add(pointerProfileKey);
+    warn(`dataRoot: 指针文件（${pointerDataRoot}）与 profile 配置（${profileRoot}）不一致，已按指针生效；要让 profile 配置生效就删掉指针文件 ${pointer.path}`);
+  }
   const dataRoot = envDataRoot || pointerDataRoot || profileRoot || normalizeDirPath(defaultDataRoot(env), env);
   const source = envDataRoot ? "env" : pointerDataRoot ? "pointer" : profileRoot ? "profile" : "default";
   const projectsSource = envProjectsRoot ? "env" : pointerProjectsRoot ? "pointer" : profileProjects ? "profile" : "default";

@@ -2685,6 +2685,25 @@ function noteDataDirTransitions(serviceLike, report, trigger = "poll") {
 /**
  * 数据目录载荷：黄条 / 设置页 / 自检共用（不重算解析，只合并最新体检）。
  */
+/**
+ * 「指针覆盖了 profile 配置」的事实（没有冲突返回 null）。
+ * 这是本次事故的根因：web profile 没配 dataRoot、desktop 配了仓库 .deck，而指针全机共享——
+ * 谁写的指针谁说了算，界面上却只显示「当前 = 指针」，看不出 profile 里还写着另一个目录。
+ */
+function pointerConflictOf(resolved = {}) {
+  const profileDataRoot = String(resolved.profileDataRoot ?? "").trim();
+  const fact = resolved.dataRoot ?? {};
+  if (!profileDataRoot || fact.source !== "pointer") return null;
+  if (String(fact.value ?? "") === profileDataRoot) return null;
+  return {
+    profileDataRoot,
+    pointerDataRoot: String(fact.value ?? ""),
+    pointerFile: String(resolved.pointerFile?.path ?? ""),
+    setBy: String(resolved.pointerFile?.setBy ?? ""),
+    updatedAt: String(resolved.pointerFile?.updatedAt ?? ""),
+  };
+}
+
 function dataDirStateOf(serviceLike, deckId = null, { refresh = false, countImages = false } = {}) {
   const { config } = serviceLike;
   const resolved = config.dataDir ?? {};
@@ -2701,6 +2720,8 @@ function dataDirStateOf(serviceLike, deckId = null, { refresh = false, countImag
     firstRun: resolved.firstRun === true,
     processCwd: resolved.processCwd ?? process.cwd(),
     sourceLabel: resolved.sourceLabel ?? "",
+    // 指针赢过 profile 时的「为什么」：profile 配的是哪个目录、指针文件在哪。前端只在有冲突时多画一行。
+    pointerConflict: pointerConflictOf(resolved),
     banner: dataDirBannerFacts({ report, deckId, envOverride: resolved.envOverride?.active === true, dataRoot: config.dataRoot }),
     decks: report.decks,
     candidates: report.candidates,

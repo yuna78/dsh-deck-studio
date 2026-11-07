@@ -188,6 +188,13 @@ Deckline 的数据分两处：**你的 deck 源**（`projectsRoot`，纯 md + �
   `dataRoot` / `DSH_DECK_DATA_ROOT`，两边就各看各的。所以「换到另一个端口，内容变空 / 标题在但页面空白」先别怀疑端口：
   去那个实例的 ⚙ 看「当前数据目录」，再和这边显示的路径比一比。
   **换端口不改数据，换 dataRoot 才改数据。**
+- **指针的优先级高于 profile**（「打开一片空白 + 黄条」最常见的真凶）：`$DSH_HOME/deckline/location.json`
+  是全机共享的「用户选择」，解析顺序是 `env > 指针 > profile patch > 默认`。在一个实例里点过
+  「切到这个目录」，同一个 `$DSH_HOME` 下的其它 profile 也会跟着换目录——**哪怕它在 patch 里写了 `dataRoot`**。
+  想让各端稳定一致，二选一：① 每个 profile 的 patch 写**同一个** `dataRoot`，并删掉
+  `~/.dsh/deckline/location.json`；② 只用默认目录，不要在界面里切。真有冲突时黄条会多写一行
+  「你的 profile 里配的是 A，但指针文件把它改成了 B——指针优先；切换只改指针，不动文件」，
+  日志里也有一条 `dataRoot: 指针文件（B）与 profile 配置（A）不一致` 的 warn（每次冲突只打一次）。
 - 报问题不用自己拼路径：⚙ →「当前数据目录与自检」底部 **「复制诊断信息」** 一键复制（内容由插件生成、已脱敏，
   不含 key），贴出来就包含 cwd / dataRoot（含来源）/ projectsRoot / 每本 deck 有没有 `script/current.md`。
 - 开发环境用独立 `dataRoot`，不要把运行数据写进仓库（见 §7「开发数据目录」）。

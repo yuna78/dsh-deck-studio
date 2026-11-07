@@ -1528,11 +1528,16 @@ function renderDataDirBanner(data) {
       : "⚠ 这本 deck 的正文和图片不在当前数据目录";
   const currentRoot = dd?.dataRoot?.value || banner.dataRoot || "—";
   const sourceNote = dd?.sourceLabel ? `（${esc(dd.sourceLabel)}）` : "";
+  // 指针赢过 profile 时把「为什么」写出来：否则只看到「当前 = 指针」，不知道 profile 里还写着另一个目录。
+  const conflict = dd?.pointerConflict && dd.pointerConflict.profileDataRoot !== dd?.dataRoot?.value ? dd.pointerConflict : null;
+  const conflictLine = conflict
+    ? `<span class="data-dir-line data-dir-conflict">你的 profile 里配的是 <code>${esc(conflict.profileDataRoot)}</code>，但指针文件把它改成了上面这个目录${conflict.setBy ? `（${esc(conflict.setBy)}）` : ""}——<b>指针优先</b>。点「切到这个目录」只改指针，不会删改任何 deck 文件。</span>`
+    : "";
   const candidates = banner.candidates || [];
   const rows = candidates.length
     ? candidates.map((candidate) => `<div class="data-dir-candidate"><span class="data-dir-path">已发现：${esc(candidate.dataRoot)}</span><span class="data-dir-count">（${Number(candidate.deckCount) || 0} 本 deck · ${Number(candidate.imageCount) || 0} 张图）</span><button class="btn ghost" data-data-root="${esc(candidate.dataRoot)}"${envOverride ? " disabled" : ""}>切到这个目录</button></div>`).join("")
     : `<div class="data-dir-candidate data-dir-empty"><span>没找到这本 deck 的历史数据。如果你在另一个 DSH 实例里出过图，请在那个实例的『设置』里看它显示的数据目录，然后把它填到下面。</span><input id="dataDirManualInput" placeholder="/绝对路径"${envOverride ? " disabled" : ""}><button class="btn ghost" id="dataDirManualSwitch"${envOverride ? " disabled" : ""}>用这个目录</button></div>`;
-  box.innerHTML = `<div class="data-dir-banner-body"><div class="data-dir-banner-main"><b>${title}</b><span class="data-dir-line" title="换端口不改数据，换 dataRoot 才改数据。">当前：<code>${esc(currentRoot)}</code>${sourceNote}</span>${rows}</div><div class="data-dir-banner-actions"><button class="btn ghost" id="dataDirOpenSettings">打开设置</button><button class="btn ghost" id="dataDirCopyDiag">复制诊断信息</button>${envOverride ? `<span class="data-dir-readonly">由环境变量 ${esc(dd?.envOverride?.name || "DSH_DECK_DATA_ROOT")} 指定（只读）</span>` : ""}</div></div>`;
+  box.innerHTML = `<div class="data-dir-banner-body"><div class="data-dir-banner-main"><b>${title}</b><span class="data-dir-line" title="换端口不改数据，换 dataRoot 才改数据。">当前：<code>${esc(currentRoot)}</code>${sourceNote}</span>${conflictLine}${rows}</div><div class="data-dir-banner-actions"><button class="btn ghost" id="dataDirOpenSettings">打开设置</button><button class="btn ghost" id="dataDirCopyDiag">复制诊断信息</button>${envOverride ? `<span class="data-dir-readonly">由环境变量 ${esc(dd?.envOverride?.name || "DSH_DECK_DATA_ROOT")} 指定（只读）</span>` : ""}</div></div>`;
   box.hidden = false;
   box.querySelectorAll("[data-data-root]").forEach((node) => node.addEventListener("click", () => switchDataDirTo(node.dataset.dataRoot)));
   box.querySelector("#dataDirOpenSettings")?.addEventListener("click", () => openSettingsPanel());

@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.2.27] · 2026-11-06
+
+> 同一台机装了多个 DSH profile / 实例时，打开某本 deck 可能看到「正文和图片不在当前数据目录」的黄条，
+> 而界面只显示「当前 = 指针文件」，看不出 profile 里还写着另一个目录——数据没丢，但没人解释为什么。
+
+### 改进（不改解析优先级、不迁移任何数据）
+
+- **指针覆盖 profile 时留痕**：`resolveDataDir()` 在「指针文件 ≠ profile 配置」时打一条 warn
+  （`dataRoot: 指针文件（…）与 profile 配置（…）不一致，已按指针生效…`），按「指针→profile」这一对去重，
+  同一处冲突不刷屏、换了目录会再提醒一次。此前只 warn `env` 与 `profile` 冲突，指针冲突完全静默。
+- **黄条把「为什么」写出来**：`/api/deck-studio.data-dir` 新增 `pointerConflict`
+  （profile 配的目录 / 指针指向 / setBy / 更新时间）；有冲突时黄条多一行说明，并明确「切换只改指针，
+  不会删改任何 deck 文件」。
+- **安装文档补口径**：`docs/install.md` §2.5 写明 `env > 指针 > profile > 默认` 的优先级，
+  以及「多 profile 共用一台机」时两种统一办法。
+
+### 验证
+
+- `verify/smoke.mjs` 122/122（新增 2 条：指针 vs profile 的 warn 与去重、`pointerConflict` 载荷有/无两种情形）。
+- `scripts/harness-check.mjs --strict`、`npm run docs:check`、`node scripts/build-public-bundle.mjs` 见发布记录。
+
 ## [0.2.26] · 2026-11-06
 
 > 导入 PDF 成功之后，工作台进入的是**列表里第一本 deck**，不是刚导入的那本。
