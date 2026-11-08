@@ -18,6 +18,9 @@
 the deck workspace in the middle, and the library / design styles / assets / conversations on the right.
 It turns "who is this for, what do we say, how do we draw it" into a traceable pipeline, not another PPT editor.
 
+> Also known as: **AI PPT generator / AI presentation maker / slide generator / deck generator /
+> text to slides / image deck**. Deckline does not fill a template — every slide is one full-page image.
+
 - Conversation stays in chat; every deck change is backed by script / diff / revision / governance docs;
 - Images are rendered **one slide at a time**; each slide keeps its prompt, image, revisions, QA and events;
 - **Present immediately**: fullscreen playback, arrow-key navigation and Esc to exit — no export required;
@@ -52,7 +55,7 @@ Open the `http://127.0.0.1:13090/?token=…` URL printed in the terminal — tha
 DSH-native chat on the left, full-page image storyboard in the middle, document library on the right.
 
 Once installed you don't need to remember commands: the header keeps three buttons on the right —
-**⚙** jumps to the settings panel (render node / model / size), **↻ v0.2.11** checks npm for a newer release
+**⚙** jumps to the settings panel (render node / model / size), **↻ version chip** checks npm for a newer release
 (one click runs `dsh plugin add`; restart DSH to apply), and **GitHub** opens the repo's new-issue page. A `link:` / `file:` development install is recognised and never
 auto-updated (it would replace your local link), it just explains to pull the repo instead.
 
@@ -207,7 +210,7 @@ asked to invent them.
 
 ## Status
 
-- Current version: `v0.2.11` (usable; API may still change)
+- Current version: `v0.2.28` (usable; API may still change)
 - License: **MIT** (see [LICENSE](LICENSE))
 
 ## License

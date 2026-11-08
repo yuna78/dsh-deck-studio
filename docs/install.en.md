@@ -43,7 +43,7 @@ node -v && pnpm -v && dsh --version
 dsh --profile deckline --from-default-profile web
 
 # 2) install the plugin; dsh plugin add adds the bundle to the profile and enables it
-dsh plugin --profile deckline add dsh-plugin-deck-studio@0.2.13
+dsh plugin --profile deckline add dsh-plugin-deck-studio
 ```
 
 > Do not skip step 1: the `deckline` profile is **never created automatically**. Running
@@ -181,7 +181,7 @@ From zero to 13090, run these three commands in order (options for steps 1–2 a
 dsh --profile deckline --from-default-profile web
 
 # 2) install the plugin (adds it to that profile and enables it)
-dsh plugin --profile deckline add dsh-plugin-deck-studio@0.2.13
+dsh plugin --profile deckline add dsh-plugin-deck-studio
 
 # 3) start
 dsh --profile deckline --port 13090

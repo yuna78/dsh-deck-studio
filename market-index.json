@@ -29,6 +29,24 @@
           "en": "DSH plugin",
           "zh": "DSH 插件"
         }
+      },
+      "ai-ppt": {
+        "title": {
+          "en": "AI PPT",
+          "zh": "AI 做 PPT"
+        }
+      },
+      "image-generation": {
+        "title": {
+          "en": "Image generation",
+          "zh": "AI 出图"
+        }
+      },
+      "pdf-export": {
+        "title": {
+          "en": "PDF / PPTX export",
+          "zh": "导出 PDF / PPTX"
+        }
       }
     },
     "sortKeys": {
@@ -64,20 +82,37 @@
         "keywords": [
           "deck",
           "image deck",
+          "deckline",
           "presentation",
           "slides",
           "ppt",
           "pptx",
           "powerpoint",
           "ai ppt",
-          "slide deck",
-          "deckline",
+          "ai presentation",
+          "ai slides",
+          "text to slides",
+          "slide generator",
+          "deck generator",
+          "image generation",
+          "storyboard",
+          "pdf export",
+          "pptx export",
+          "dsh",
+          "dsh plugin",
+          "deepseek harness",
           "幻灯片",
-          "演示文稿"
+          "演示文稿",
+          "图片幻灯片",
+          "AI 生成 PPT",
+          "AI 做 PPT"
         ],
         "labels": [
           "image-deck",
-          "dsh-plugin"
+          "dsh-plugin",
+          "ai-ppt",
+          "image-generation",
+          "pdf-export"
         ],
         "sortKeys": {
           "published": 1792909443

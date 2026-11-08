@@ -45,7 +45,7 @@ node -v && pnpm -v && dsh --version
 dsh --profile deckline --from-default-profile web
 
 # 2) 装插件；dsh plugin add 会自动把组合包加入 profile 并默认启用
-dsh plugin --profile deckline add dsh-plugin-deck-studio@0.2.13
+dsh plugin --profile deckline add dsh-plugin-deck-studio
 ```
 
 > 第 1 步不能省：`deckline` profile **不会**被自动创建。跳过第 1 步直接 `dsh --profile deckline --port 13090`，
@@ -54,7 +54,7 @@ dsh plugin --profile deckline add dsh-plugin-deck-studio@0.2.13
 
 > 国内网络直连 `registry.npmjs.org` 可能很慢（20 MB 包实测约 19 KB/s，要十几分钟）。换镜像会快很多：
 > ```sh
-> npm_config_registry=https://registry.npmmirror.com dsh plugin --profile deckline add dsh-plugin-deck-studio@0.2.13
+> npm_config_registry=https://registry.npmmirror.com dsh plugin --profile deckline add dsh-plugin-deck-studio
 > ```
 > 或一次性 `npm config set registry https://registry.npmmirror.com`。
 
@@ -75,7 +75,7 @@ DSH 目前没有官方插件市场，市场是「索引源」模式：添加下�
    https://raw.githubusercontent.com/yuna78/dsh-deck-studio/main/market-index.json
    ```
 
-3. 搜索 `Deckline` 或 `PPT` → **安装**，会安装 `dsh-plugin-deck-studio@0.2.13`（索引里声明了国内镜像 registry）。
+3. 搜索 `Deckline` 或 `PPT` → **安装**，会安装 `dsh-plugin-deck-studio`（索引里声明了国内镜像 registry）。
 4. 之后同 A 的第 3 步启动。
 
 索引文件就是仓库根目录的 [`market-index.json`](../market-index.json)（格式 1），新版本发布后更新版本号即可。
@@ -217,7 +217,7 @@ profile "deckline" does not exist
 dsh --profile deckline --from-default-profile web
 
 # 2) 装插件（自动加进该 profile 并启用）
-dsh plugin --profile deckline add dsh-plugin-deck-studio@0.2.13
+dsh plugin --profile deckline add dsh-plugin-deck-studio
 
 # 3) 启动
 dsh --profile deckline --port 13090
