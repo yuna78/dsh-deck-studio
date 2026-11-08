@@ -28,7 +28,7 @@ export function createScriptToSourceSync({ adapters = [], isLocalDeck = null } =
     if (!sourceRoot || !existsSync(sourceRoot)) return null;
     const file = join(sourceRoot, "script.md");
     writeFileSync(file, scriptText.endsWith("\n") ? scriptText : `${scriptText}\n`, "utf8");
-    const label = proposal?.kind === "script-add-page" ? "追加页" : proposal?.kind === "script-insert-page" ? "插页" : "改稿";
+    const label = proposal?.kind === "script-add-page" ? "追加页" : proposal?.kind === "script-insert-page" ? "插页" : proposal?.kind === "script-delete-page" ? "删页" : "改稿";
     const git = commitFiles({ dir: sourceRoot, files: [file], message: `deck(${deckId})：${label}回写 script` });
     return { path: file, ok: git?.ok === true, commit: git?.commit ?? null, error: git?.ok ? null : git?.error ?? "git 未提交" };
   };
@@ -221,6 +221,94 @@ export function remapProposalsAfterInsert(workspace, deckId, { fromPage, shift, 
 }
 
 /**
+ * 删页确认后的 manifest 同步（F-215）：
+ * 1) 被删页的图片目录移到 `slides/.deleted/<时间戳>/`（不直接删，误删可捞）；
+ * 2) 后面页的目录整体前移；
+ * 3) manifest 去掉被删页、其余页重编号，`sourcePage` 保持原始源页不动（源 baseline 图不串页）；
+ * 4) 删掉的若是封面（P01 且 type=cover），新第一页接管封面。
+ */
+export function syncDeletePageManifest(workspace, proposal, applied) {
+  const deck = workspace.manifest(proposal.deckId);
+  if (!deck) throw new Error(`manifest 缺失：${proposal.deckId}`);
+  const slides = Array.isArray(deck.slides) ? deck.slides : [];
+  const targets = (applied?.deleted ?? []).map((item) => Number(item.page)).filter((page) => Number.isInteger(page));
+  if (!targets.length) throw new Error("删页参数无效：没有要删除的页");
+
+  const removedCover = slides.some((slide) => Number(slide.order) === 1 && targets.includes(1) && slide.type === "cover");
+  const trashed = workspace.trashSlideDirs(deck.id, { pages: targets });
+  const remaining = slides
+    .filter((slide) => !targets.includes(Number(slide.order)))
+    .map((slide) => {
+      const order = Number(slide.order);
+      const shift = targets.filter((target) => target < order).length;
+      if (!shift) return slide;
+      const next = { ...slide, order: order - shift, id: pageIdFromNumber(order - shift) };
+      // 源页映射：删页不改「这页内容最初来自源第几页」，只在第一次改号时补记。
+      if (!Object.prototype.hasOwnProperty.call(slide, "sourcePage")) next.sourcePage = order;
+      return next;
+    })
+    .sort((left, right) => (left.order ?? 0) - (right.order ?? 0));
+
+  if (removedCover) {
+    const first = remaining.find((slide) => Number(slide.order) === 1);
+    if (first) {
+      first.type = "cover";
+      // 原来的封面页已经删了，不能留着两个封面。
+      for (const slide of remaining) if (slide !== first && slide.type === "cover") slide.type = "story";
+    }
+  }
+  deck.slides = remaining;
+  workspace.saveManifest(deck);
+
+  const mapping = slides
+    .filter((slide) => !targets.includes(Number(slide.order)))
+    .map((slide) => {
+      const order = Number(slide.order);
+      const shift = targets.filter((target) => target < order).length;
+      return shift ? { fromId: slide.id, toId: pageIdFromNumber(order - shift) } : null;
+    })
+    .filter(Boolean);
+  const moved = workspace.renumberSlideDirs(deck.id, mapping);
+  return { trashed, moved, deletedPages: targets, coverPromoted: removedCover ? remaining[0]?.id ?? null : null };
+}
+
+/**
+ * 删页确认后处理**待确认提案**（F-215）：
+ * - 落在被删页上的提案 → 标记 superseded（页都没了，落版只会报错）；
+ * - 落在后面页上的提案 → 页号前移。
+ */
+export function remapProposalsAfterDelete(workspace, deckId, { deleted = [], skipIds = [] } = {}) {
+  const targets = deleted.map((item) => Number(item.page ?? item)).filter((page) => Number.isInteger(page));
+  const remapped = [];
+  const dropped = [];
+  for (const proposal of workspace.listProposals(deckId, "waiting-user")) {
+    if (skipIds.includes(proposal.proposalId)) continue;
+    if (proposal.kind === "script-add-page" || proposal.kind === "script-insert-page" || proposal.kind === "script-delete-page") continue;
+    const oldPage = Number(proposal.page);
+    const pages = Array.isArray(proposal.pageIds) ? proposal.pageIds : [];
+    if (targets.includes(oldPage) || pages.some((id) => targets.includes(pageNumberFromId(id)))) {
+      workspace.updateProposal(proposal, {
+        status: "superseded",
+        supersededReason: "page-deleted",
+        decidedAt: proposalNow(),
+        decidedBy: "system",
+      });
+      dropped.push(proposal.proposalId);
+      continue;
+    }
+    const shift = targets.filter((target) => target < oldPage).length;
+    if (!shift) continue;
+    workspace.updateProposal(proposal, {
+      page: oldPage - shift,
+      pageId: pageIdFromNumber(oldPage - shift),
+      renumberedAfterDelete: { removedBefore: shift },
+    });
+    remapped.push({ proposalId: proposal.proposalId, from: proposal.pageId, to: pageIdFromNumber(oldPage - shift) });
+  }
+  return { remapped, dropped };
+}
+
+/**
  * 批量落版（F-176 / 智力升级 I-18）：把一批 script 提案合成**一条** revision。
  * 首稿自动落版（F-173）与用户「接受并更新」勾选批次共用这一段，保证两条路径的写入语义一致。
  */
@@ -231,13 +319,16 @@ function landProposalBatch({ store, workspace, proposals, decidedBy, quote = "",
   for (const proposal of list) {
     if (proposal.deckId !== deckId) throw new Error("批量落版只处理同一个 deck 的提案");
     if (proposal.status !== "waiting-user") throw new Error(`提案 ${proposal.proposalId} 状态为 ${proposal.status}，只有 waiting-user 可落版`);
-    if (proposal.kind !== "script" && proposal.kind !== "script-add-page" && proposal.kind !== "script-insert-page" && proposal.kind !== "manifest") {
-      throw new Error(`批量落版不支持 ${proposal.kind} 类提案（只支持 script 正文 / 追加页 / 插页 / visualBrief）`);
+    if (proposal.kind !== "script" && proposal.kind !== "script-add-page" && proposal.kind !== "script-insert-page" && proposal.kind !== "script-delete-page" && proposal.kind !== "manifest") {
+      throw new Error(`批量落版不支持 ${proposal.kind} 类提案（只支持 script 正文 / 追加页 / 插页 / 删页 / visualBrief）`);
     }
   }
   // F-208：插页会让后面的页号整体后移；和别的提案混批时，那些提案里的 page 已经对不上工作副本。
   if (list.some((proposal) => proposal.kind === "script-insert-page") && list.length > 1) {
     throw new Error("插页提案要单独确认：它会让后面的页号整体后移，和别的提案混批会落到错页。请先单独确认插页提案，再处理其它提案。");
+  }
+  if (list.some((proposal) => proposal.kind === "script-delete-page") && list.length > 1) {
+    throw new Error("删页提案要单独确认：它会让后面的页号整体前移，和别的提案混批会落到错页。请先单独确认删页提案，再处理其它提案。");
   }
   const current = workspace.scriptCurrent(deckId);
   if (current == null) throw new Error(`script 工作副本缺失：${deckId}`);
@@ -441,6 +532,22 @@ export function decideProposal({ store, workspace, proposal, confirmed, quote = 
       `insert ${applied.pages.length} page(s) before P${String(applied.at).padStart(2, "0")}; ${synced.moved.length} page dir(s) shifted by ${applied.shift} by user confirmation (${proposal.proposalId})`,
     );
     remapProposalsAfterInsert(workspace, proposal.deckId, { fromPage: applied.at, shift: applied.shift, skipIds: [proposal.proposalId] });
+    proposal.pageCountAfter = applied.pageCount;
+    appliedScriptText = applied.text;
+  } else if (proposal.kind === "script-delete-page") {
+    // F-215：删页 = 页号前移 + 目录回收 + manifest 重编号。和追加/插页一样基于**当前**工作副本重算，
+    // 避免提案后被别的 revision 改过而删错页。
+    const current = workspace.scriptCurrent(proposal.deckId);
+    if (current == null) throw new Error(`script 工作副本缺失：${proposal.deckId}`);
+    const applied = workspace.deleteScriptPages(current, { pages: proposal.pages ?? [] });
+    if (!applied.deleted.length) throw new Error(`提案 ${proposal.proposalId} 没有可删除的页`);
+    const synced = syncDeletePageManifest(workspace, proposal, applied);
+    revisionInfo = workspace.saveScriptRevision(
+      proposal.deckId,
+      applied.text,
+      `delete ${applied.deleted.length} page(s) ${applied.deleted.map((item) => `P${String(item.page).padStart(2, "0")}`).join(" ")}; ${synced.moved.length} page dir(s) shifted by user confirmation (${proposal.proposalId})`,
+    );
+    remapProposalsAfterDelete(workspace, proposal.deckId, { deleted: applied.deleted, skipIds: [proposal.proposalId] });
     proposal.pageCountAfter = applied.pageCount;
     appliedScriptText = applied.text;
   } else {

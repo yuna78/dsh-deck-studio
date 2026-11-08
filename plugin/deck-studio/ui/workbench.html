@@ -2772,7 +2772,7 @@ function renderDoc(doc, index) {
     return head + styleNote + densityNote + briefBanner + docIssues(doc) + storyOverview + banner + reviewPanel + `<div class="page-cards">${pages.map((page) => {
       // 追加页 / 插页是整份结构提案（kind=script-add-page / script-insert-page），没有「当前值 → 建议值」单值，
       // 不进页内提案行；它们的 diff 在顶部 banner + 观察页里确认。
-      const pageProposals = (pendingByPage.get(Number(page.page)) || []).filter((proposal) => proposal.kind !== "script-add-page" && proposal.kind !== "script-insert-page");
+      const pageProposals = (pendingByPage.get(Number(page.page)) || []).filter((proposal) => proposal.kind !== "script-add-page" && proposal.kind !== "script-insert-page" && proposal.kind !== "script-delete-page");
       const slide = slideById.get(page.id) || {};
       // 已落版值（manifest）优先：确认过的 title/question/body 必须立刻显示，不能被源文档快照盖住。
       const pageTitle = slide.title || page.title;
@@ -2780,8 +2780,8 @@ function renderDoc(doc, index) {
       const bodyText = String(slide.body || page.content || "").trim();
       // visualBrief（manifest）才是出图真正用的提示词；prompts/Pxx.txt 是源侧旧文件。
       const promptText = slide.visualBrief || page.prompt || "";
-      const fieldProposals = pageProposals.filter((proposal) => proposal.kind !== "script-add-page" && proposal.kind !== "script-insert-page");
-      const staleForPage = stalePending.filter((proposal) => Number(proposal.page) === Number(page.page) && proposal.kind !== "script-add-page" && proposal.kind !== "script-insert-page");
+      const fieldProposals = pageProposals.filter((proposal) => proposal.kind !== "script-add-page" && proposal.kind !== "script-insert-page" && proposal.kind !== "script-delete-page");
+      const staleForPage = stalePending.filter((proposal) => Number(proposal.page) === Number(page.page) && proposal.kind !== "script-add-page" && proposal.kind !== "script-insert-page" && proposal.kind !== "script-delete-page");
       const expiredForPage = pageProposals.filter((proposal) => proposal.stale);
       // 「两套」问题的修法：卡片上半部分明确是当前已落版内容，提案行显示「当前值 → 建议值」。
       const proposalBlock = pageProposals.length
@@ -2989,7 +2989,7 @@ const stripFrontmatter = (text) => String(text ?? "").replace(/^---\n[\s\S]*?\n-
 const docFileUrl = (docId, name) => `/api/deck-studio.docfile?` + new URLSearchParams({ deckId: STATE.data.active.deckId, docId, name });
 
 /** F-108：提案字段的展示名 + 预览值（分节提案的 after 是 `**字段**：值` 整行）。 */
-const PROPOSAL_FIELD_LABEL = { title: "标题", question: "副标题", claim: "主张", body: "正文", visualBrief: "画面要求", "add-page": "追加页", "insert-page": "插入页", "script-add-page": "追加页", "script-insert-page": "插入页" };
+const PROPOSAL_FIELD_LABEL = { title: "标题", question: "副标题", claim: "主张", body: "正文", visualBrief: "画面要求", "add-page": "追加页", "insert-page": "插入页", "delete-page": "删除页", "script-add-page": "追加页", "script-insert-page": "插入页", "script-delete-page": "删除页" };
 function proposalFieldLabel(field) {
   return PROPOSAL_FIELD_LABEL[field] || field || "修改";
 }
@@ -3185,7 +3185,7 @@ function bindDocActions(root) {
   root.querySelectorAll("[data-confirm-page]").forEach((btn) => btn.addEventListener("click", () => {
     const page = Number(btn.dataset.confirmPage);
     // 结构提案（追加页 / 插页）不挂在页卡的「当前值 → 建议值」行上，不能被「这一页全部确认」顺手带走。
-    const ids = latestByField(deckPendingProposals().filter((proposal) => Number(proposal.page) === page && !proposal.stale && proposal.kind !== "script-add-page" && proposal.kind !== "script-insert-page")).map((proposal) => proposal.proposalId);
+    const ids = latestByField(deckPendingProposals().filter((proposal) => Number(proposal.page) === page && !proposal.stale && proposal.kind !== "script-add-page" && proposal.kind !== "script-insert-page" && proposal.kind !== "script-delete-page")).map((proposal) => proposal.proposalId);
     decideProposals(ids, true);
   }));
   root.querySelectorAll("[data-confirm-all]").forEach((btn) => btn.addEventListener("click", () => decideProposals(freshProposalIds(), true)));
@@ -3775,6 +3775,7 @@ function renderSettings(data) {
   const dd = readDataDir(data);
   const renderNodes = data.active?.renderNodes || { nodes: [], active: null };
   const settings = data.renderSettings || {};
+  const vision = settings.vision || {};
   // 设置页里正在编辑的节点列表（以服务端 payload 为种子；保存时整表提交）
   if (!Array.isArray(SETTINGS_NODES) || !SETTINGS_NODES.length) {
     SETTINGS_NODES = (renderNodes.nodes || []).map((node) => ({
@@ -3861,6 +3862,25 @@ function renderSettings(data) {
       <p class="engine-note">key 只写进本机数据目录 <code>.deck/render-settings.json</code>（0600，已 gitignore），界面只显示「已保存」；
         仓库和 profile 里都不会出现你的 key 或节点地址。</p>
     </div>
+    <h3 class="settings-title">视觉评审（审图）· 可选</h3>
+    <p class="engine-note"><b>默认不需要配</b>：审图用 <b>DSH 自己的模型</b>（一次性内部子代理）看图，零配置、不额外花钱。
+      这里填了才改用独立通道（OpenAI 兼容 <code>/v1/chat/completions</code> + 支持图片输入的模型）——想让审图走更便宜/更快的专用模型时才填。</p>
+    <div class="node-card">
+      <div class="node-head"><b>视觉评审通道</b><span class="node-key ${vision.configured ? "ok" : ""}">${vision.configured ? "独立通道可用" : "默认：DSH 模型"}</span></div>
+      <div class="node-meta">${vision.configured ? esc(vision.baseURL) + (vision.model ? ` · ${esc(vision.model)}` : "") + (vision.source === "profile" ? " · 来自 profile" : " · 来自设置文件") : "不填就用 DSH 默认模型（零配置）"}</div>
+      <label class="field"><span>接口地址（OpenAI 兼容，一般以 /v1 结尾）</span>
+        <input id="rsVisionBase" placeholder="https://your-relay.example.com/v1" value="${esc(vision.baseURL || "")}"></label>
+      <div class="nd-row">
+        <label class="field"><span>模型名（支持图片输入的聊天模型）</span>
+          <input id="rsVisionModel" placeholder="例：gpt-6-sol" value="${esc(vision.model || "")}"></label>
+        <label class="field"><span>API Key（留空 = 不改）</span>
+          <input id="rsVisionKey" type="password" autocomplete="off" placeholder="${vision.keyConfigured ? "已保存，留空不改" : "粘贴 key"}"></label>
+      </div>
+      <div class="settings-actions">
+        <button class="btn solid" id="rsVisionSave" type="button">保存视觉评审</button>
+        <span class="small" id="rsVisionState">${vision.keyConfigured ? "key 已保存（不回显）" : "还没有 key"}</span>
+      </div>
+    </div>
     <h3 class="settings-title">其它</h3>
     <div class="diag-card${dd.envOverride.active ? " is-env" : ""}">
       <div class="diag-root">当前数据目录：<code>${esc(shortPath(dd.dataRoot.value || dd.dataRoot.effective, 62))}</code>${diagSourceChip(dd.dataRoot)}</div>
@@ -3871,6 +3891,7 @@ function renderSettings(data) {
   getEl("rsActive")?.setAttribute("title", "当前 deck 生效的节点 / 模型（切换后下一次出图生效）");
   fillSettingsNodeForm();
   bindRenderSettingsForm();
+  bindVisionSettingsForm();
   bindSettingsNodeSwitch();
   bindSettingsNodeEditor();
 }
@@ -3952,6 +3973,45 @@ async function saveSettingsNodes(nodes, stateText, options = {}) {
     ? `已保存并切换到新节点：${options.activateLabel || options.activateNodeId}（下一次出图生效）`
     : `出图设置已保存（${result.nodes?.length ?? 0} 个节点）`);
   await loadWorkbench(deckId);
+}
+
+/** 保存「视觉评审（审图）」通道：只提交 imageReview，不动出图节点 / 模式。 */
+async function saveVisionSettings() {
+  const baseURL = getEl("rsVisionBase")?.value.trim() || "";
+  const model = getEl("rsVisionModel")?.value.trim() || "";
+  const apiKey = getEl("rsVisionKey")?.value.trim() || "";
+  const state = getEl("rsVisionState");
+  const button = getEl("rsVisionSave");
+  if (!baseURL) { flash("先填视觉评审的接口地址（OpenAI 兼容，一般以 /v1 结尾）", "error"); return; }
+  if (!model) { flash("先填视觉评审的模型名（要支持图片输入）", "error"); return; }
+  if (button) button.disabled = true;
+  if (state) state.textContent = "正在保存 …";
+  try {
+    const imageReview = { baseURL, model };
+    if (apiKey) imageReview.apiKey = apiKey;
+    const res = await fetch("/api/deck-studio.render-settings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ imageReview }),
+    });
+    const result = await res.json();
+    if (!res.ok || !result.ok) throw new Error(result.error?.message || "保存失败");
+    if (getEl("rsVisionKey")) getEl("rsVisionKey").value = "";
+    flash(`视觉评审已保存：${result.vision?.configured ? "可用" : "还缺 key / 模型"}`);
+    await loadWorkbench(STATE.deckId);
+  } catch (error) {
+    if (state) state.textContent = "保存失败：" + error.message;
+    flash("保存视觉评审失败：" + error.message, "error");
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+function bindVisionSettingsForm() {
+  const button = getEl("rsVisionSave");
+  if (!button || button.dataset.bound === "1") return;
+  button.dataset.bound = "1";
+  button.addEventListener("click", saveVisionSettings);
 }
 
 function bindRenderSettingsForm() {
@@ -5460,10 +5520,10 @@ function setupNativeChat() {
     const menu = getEl("chatSessionMenu");
     if (menu.hidden) return;
     if (menu.contains(event.target) || event.target.closest?.("#chatSessionBtn")) return;
-    menu.hidden = true;
+    setChatSessionMenuOpen(false);
   });
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") getEl("chatSessionMenu").hidden = true;
+    if (event.key === "Escape") setChatSessionMenuOpen(false);
   });
 }
 
@@ -5528,10 +5588,10 @@ function setupHostChatColumn() {
     const menu = getEl("chatSessionMenu");
     if (menu.hidden) return;
     if (menu.contains(event.target) || event.target.closest?.("#chatSessionBtn")) return;
-    menu.hidden = true;
+    setChatSessionMenuOpen(false);
   });
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") getEl("chatSessionMenu").hidden = true;
+    if (event.key === "Escape") setChatSessionMenuOpen(false);
   });
   document.body.classList.add("desktop-host");
   refreshSessions().then(renderChatHeader).catch(() => renderChatHeader());
@@ -5931,7 +5991,7 @@ function renderChatSessionMenu(sessions, target) {
       ? `<div class="chat-session-menu-head">未绑定的会话（点开后可绑到本 ${target.chip}）</div>` + unbound.map(itemHtml).join("")
       : "");
   menu.querySelectorAll("[data-chat-session]").forEach((node) => node.addEventListener("click", async () => {
-    menu.hidden = true;
+    setChatSessionMenuOpen(false);
     const sessionId = node.dataset.chatSession;
     const result = await requestConversation({ action: "open", sessionId });
     if (!result.ok) {
@@ -5945,16 +6005,35 @@ function renderChatSessionMenu(sessions, target) {
   }));
 }
 
+/** 会话下拉是 iframe 内的绝对定位元素；桌面 Dock 的宿主覆盖层（z-index 40）盖在 #chatDockArea 上，
+ * 下拉一展开就钻进被覆盖的矩形里 → 看起来「点了没反应」。所以开合时要请宿主把 Dock 暂时藏起来。 */
+function notifyHostDockVisibility(visible) {
+  if (!DESKTOP_HOST) return;
+  try { window.parent?.postMessage({ type: "dsh-deck-studio:chat-dock-visibility", visible }, "*"); } catch { /* 宿主桥不可用 */ }
+}
+
+function setChatSessionMenuOpen(open) {
+  const menu = getEl("chatSessionMenu");
+  if (!menu) return;
+  if (open) {
+    const target = activeChatTarget();
+    if (!target) return;
+  }
+  menu.hidden = !open;
+  notifyHostDockVisibility(!open);
+}
+
 function toggleChatSessionMenu() {
   const menu = getEl("chatSessionMenu");
+  if (!menu) return;
   if (!menu.hidden) {
-    menu.hidden = true;
+    setChatSessionMenuOpen(false);
     return;
   }
   const target = activeChatTarget();
   if (!target) return;
   renderChatSessionMenu(chatSessionsForTarget(target), target);
-  menu.hidden = false;
+  setChatSessionMenuOpen(true);
 }
 
 /** 查一个会话是不是空白（新建）——只有空白会话才自动绑定，有历史的会话要求手动确认。 */

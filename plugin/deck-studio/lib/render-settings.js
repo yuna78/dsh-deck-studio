@@ -52,8 +52,19 @@ function normalizeNode(raw = {}, index = 0) {
   };
 }
 
+function normalizeImageReview(raw = {}) {
+  return {
+    baseURL: asTrimmed(raw.baseURL),
+    model: asTrimmed(raw.model),
+    apiKey: asTrimmed(raw.apiKey),
+    apiKeyEnv: asTrimmed(raw.apiKeyEnv),
+    apiKeyFile: expandHome(asTrimmed(raw.apiKeyFile)),
+  };
+}
+
 function normalizeSettings(raw = {}) {
   return {
+    imageReview: normalizeImageReview(raw.imageReview),
     mode: asTrimmed(raw.mode) === "real" ? "real" : "fake",
     size: asTrimmed(raw.size),
     default: asTrimmed(raw.default),
@@ -81,11 +92,40 @@ function normalizeKeyText(value) {
 
 /** 校验 + 落盘；返回规范化后的设置（抛错 = 不合法，前端直接显示）。 */
 export function saveRenderSettings(dataRoot, payload = {}, now = new Date()) {
-  const values = normalizeSettings(payload);
+  const previousSettings = readRenderSettings(dataRoot);
+  const previousValues = previousSettings.values ?? null;
+  // 只保存「视觉评审」时不能顺带把出图配置重置成默认值（mode 会掉回 fake）。
+  // 判据：payload 里只有 imageReview，没带 nodes / mode / endpoint / model / size。
+  const visionOnly = Boolean(payload && payload.imageReview)
+    && !payload.nodes && !payload.mode && !payload.endpoint && !payload.model && !payload.size;
+  const values = visionOnly && previousValues ? { ...previousValues } : normalizeSettings(payload);
   if (values.size && !/^\d{3,4}x\d{3,4}$/.test(values.size)) throw new Error("尺寸格式应为 宽x高，例如 2560x1440");
   if (values.endpoint && !/^https?:\/\/[^\s]+$/i.test(values.endpoint)) throw new Error("接口地址（endpoint）必须是 http(s) 开头的完整 URL");
   if (values.model && !MODEL_RE.test(values.model)) throw new Error("模型名只允许字母 / 数字 / . _ : / -（≤80 字）");
   if (values.apiKeyEnv && !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(values.apiKeyEnv)) throw new Error("key 环境变量名不合法（字母数字下划线，不能以数字开头）");
+
+  // 视觉评审（审图）通道：和出图节点同等对待——只在本机设置文件里存，payload 不回 key。
+  // 不传 imageReview 就不动已有配置（避免「保存出图节点把审图通道清空」）。
+  const previousVision = previousValues?.imageReview ?? null;
+  if (payload && Object.prototype.hasOwnProperty.call(payload, "imageReview")) {
+    const vision = normalizeImageReview(payload.imageReview);
+    if (vision.baseURL && !/^https?:\/\/[^\s]+$/i.test(vision.baseURL)) throw new Error("视觉评审接口地址必须是 http(s) 开头的完整 URL");
+    if (vision.model && !MODEL_RE.test(vision.model)) throw new Error("视觉评审模型名只允许字母 / 数字 / . _ : / -（≤80 字）");
+    if (vision.apiKeyEnv && !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(vision.apiKeyEnv)) throw new Error("视觉评审的 key 环境变量名不合法");
+    const keyText = normalizeKeyText(vision.apiKey);
+    if (keyText && !/^\S{8,300}$/.test(keyText)) throw new Error("视觉评审 API Key 格式不对（不能有空格，8–300 字符）");
+    values.imageReview = {
+      ...vision,
+      apiKey: keyText || previousVision?.apiKey || "",
+      // 只填了 key 没填别的时，沿用之前配好的 baseURL / model（常见操作：换 key）
+      baseURL: vision.baseURL || previousVision?.baseURL || "",
+      model: vision.model || previousVision?.model || "",
+      apiKeyEnv: vision.apiKeyEnv || previousVision?.apiKeyEnv || "",
+      apiKeyFile: vision.apiKeyFile || previousVision?.apiKeyFile || "",
+    };
+  } else if (previousVision) {
+    values.imageReview = previousVision;
+  }
 
   if (Array.isArray(payload?.nodes)) {
     if (values.nodes.length > MAX_NODES) throw new Error(`节点最多 ${MAX_NODES} 个`);
@@ -111,7 +151,7 @@ export function saveRenderSettings(dataRoot, payload = {}, now = new Date()) {
     const defaultNode = slash > 0 ? values.nodes.find((node) => node.id === wantedDefault.slice(0, slash)) : null;
     const defaultModel = defaultNode?.models.find((model) => model === wantedDefault.slice(slash + 1));
     values.default = defaultNode && defaultModel ? `${defaultNode.id}/${defaultModel}` : values.nodes[0] ? `${values.nodes[0].id}/${values.nodes[0].models[0]}` : "";
-  } else {
+  } else if (!visionOnly) {
     if (values.mode === "real" && !values.endpoint) throw new Error("real 模式必须填接口地址（endpoint，出图节点的完整 URL）");
     if (values.mode === "real" && !values.model) throw new Error("real 模式必须填模型名");
     values.default = "";
@@ -139,6 +179,12 @@ export function applyRenderSettings(config, saved) {
   const values = saved?.values;
   if (!values) return false;
   const render = config.render ?? (config.render = {});
+  if (values.imageReview) {
+    const vision = config.imageReview ?? (config.imageReview = {});
+    for (const field of ["baseURL", "model", "apiKey", "apiKeyEnv", "apiKeyFile"]) {
+      if (values.imageReview[field]) vision[field] = values.imageReview[field];
+    }
+  }
   if (values.mode) render.mode = values.mode;
   if (values.size) render.size = values.size;
   for (const key of ["endpoint", "model", "apiKeyEnv", "apiKeyFile"]) {
@@ -192,9 +238,31 @@ export function renderSettingsPayload(config, { env = process.env, saved = null 
   });
   const modelPayload = renderModelPayload(config.render, { env });
   const activeNode = modelPayload.nodes.find((node) => node.id === modelPayload.active?.nodeId) ?? modelPayload.nodes[0] ?? null;
+  // 视觉评审（审图）状态：只回「配没配 + 地址 + 模型 + key 有没有」，绝不回 key 值。
+  const visionValues = values.imageReview ?? normalizeImageReview(config.imageReview ?? {});
+  const visionKeyEnv = String(visionValues.apiKeyEnv || "");
+  let visionKeyConfigured = Boolean(String(visionValues.apiKey || "").trim()) || Boolean(visionKeyEnv && env?.[visionKeyEnv]);
+  if (!visionKeyConfigured && visionValues.apiKeyFile) {
+    try {
+      visionKeyConfigured = readFileSync(visionValues.apiKeyFile, "utf8")
+        .split("\n")
+        .some((line) => new RegExp(`^\\s*${visionKeyEnv}\\s*=`).test(line));
+    } catch {
+      visionKeyConfigured = false;
+    }
+  }
   return {
     found: Boolean(stored.values),
     file: stored.file,
+    vision: {
+      baseURL: String(visionValues.baseURL || ""),
+      model: String(visionValues.model || ""),
+      apiKeyEnv: visionKeyEnv,
+      keyConfigured: visionKeyConfigured,
+      // 配了地址 + 模型 + key 才算「可用」；少任何一项，审图工具会明确报缺哪一项。
+      configured: Boolean(visionValues.baseURL && visionValues.model && visionKeyConfigured),
+      source: stored.values?.imageReview ? "settings" : (config.imageReview?.baseURL ? "profile" : ""),
+    },
     ...(stored.warning ? { warning: stored.warning } : {}),
     mode: values.mode,
     size: values.size,

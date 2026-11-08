@@ -247,6 +247,19 @@ export function createDeckWorkspace(config) {
     return pages;
   }
 
+  /** 分节 script 里某一页的标题（`### P07 · 试点范围` → 「试点范围」）；找不到返回 null。 */
+  function scriptPageTitle(scriptText, page) {
+    const pageNo = Number(page);
+    if (!Number.isInteger(pageNo) || pageNo <= 0) return null;
+    for (const line of String(scriptText ?? "").split("\n")) {
+      const match = line.match(SCRIPT_PAGE_HEAD);
+      if (match && Number(match[1]) === pageNo) {
+        return String(match[2] ?? "").replace(/^[·.\-–—:]\s*/, "").trim();
+      }
+    }
+    return null;
+  }
+
   /** 一页的分节 script 文本块（追加 / 插页共用）。 */
   function scriptPageBlock(spec) {
     const pageNo = spec.page;
@@ -419,6 +432,149 @@ export function createDeckWorkspace(config) {
         }
         renameSync(join(slidesDir, entry.id), target);
         moved.push({ fromId: entry.id, toId });
+      }
+    } catch (error) {
+      for (const item of [...moved].reverse()) {
+        try {
+          renameSync(join(slidesDir, item.toId), join(slidesDir, item.fromId));
+        } catch {
+          /* 回滚尽力而为；原始错误更重要 */
+        }
+      }
+      throw error;
+    }
+    return moved;
+  }
+
+  /** 分节 script 的页块行区间：`### Pxx` 起，到下一个页头 / 更高层标题 / 文件末尾。 */
+  function pageBlockRanges(lines) {
+    const ranges = [];
+    for (let index = 0; index < lines.length; index += 1) {
+      const match = lines[index].match(SCRIPT_PAGE_HEAD);
+      if (!match) continue;
+      let end = lines.length;
+      for (let next = index + 1; next < lines.length; next += 1) {
+        if (SCRIPT_PAGE_HEAD.test(lines[next]) || /^#{1,2}\s/.test(lines[next])) {
+          end = next;
+          break;
+        }
+      }
+      ranges.push({ page: Number(match[1]), start: index, end });
+      index = end - 1;
+    }
+    return ranges;
+  }
+
+  /** 连续空行收敛成一行，并去掉文末多余空行。 */
+  function collapseBlankLines(lines) {
+    const out = [];
+    for (const line of lines) {
+      if (line.trim() === "" && out.length && out[out.length - 1].trim() === "") continue;
+      out.push(line);
+    }
+    while (out.length && out[out.length - 1].trim() === "") out.pop();
+    return out;
+  }
+
+  /**
+   * 删页（F-215）：从分节 script 里删掉指定页，后面的页号整体前移。
+   * - 只支持分节惯例（`### Pxx`）；表格惯例没有分节边界，删不干净就拒绝，不猜。
+   * - 至少保留 1 页：删到 0 页直接报错（用户要的是重做，不是空 deck）。
+   * - 返回 `deleted`（被删的页号与标题，用于提案文案）与 `renumberedPages`（旧页号 → 新页号）。
+   */
+  function deleteScriptPages(scriptText, { pages } = {}) {
+    const text = String(scriptText ?? "");
+    if (!text.trim()) throw new Error("删页失败：script 工作副本为空");
+    const lines = text.split("\n");
+    const existing = scriptPageNumbers(text);
+    if (!existing.length) {
+      throw new Error("删页只支持分节惯例的 script（`### Pxx · 标题`）；这份 deck 是表格惯例，没有可删的页块。");
+    }
+    const targets = [...new Set((Array.isArray(pages) ? pages : []).map((page) => Number(page)))]
+      .filter((page) => Number.isInteger(page) && page > 0)
+      .sort((left, right) => left - right);
+    if (!targets.length) throw new Error("删页需要 pages（至少一个页号，1-based）");
+    const missing = targets.filter((page) => !existing.includes(page));
+    if (missing.length) {
+      throw new Error(`删页失败：页不存在 ${missing.map((page) => `P${String(page).padStart(2, "0")}`).join(" / ")}（当前 ${existing.length} 页）`);
+    }
+    if (existing.length - targets.length < 1) {
+      throw new Error(`删页失败：不能把 ${existing.length} 页全删掉（至少保留 1 页）。要重做整份，请新建 deck。`);
+    }
+
+    const ranges = pageBlockRanges(lines);
+    const deleteSet = new Set(targets);
+    const drop = new Set();
+    const deleted = [];
+    for (const range of ranges) {
+      if (!deleteSet.has(range.page)) continue;
+      for (let index = range.start; index < range.end; index += 1) drop.add(index);
+      const head = lines[range.start].match(/^#{2,3}\s*P\d+\s*(?:[·.\-–—:]\s*)?(.*)$/);
+      deleted.push({ page: range.page, title: String(head?.[1] ?? "").trim() });
+    }
+
+    const kept = collapseBlankLines(lines.filter((_, index) => !drop.has(index)));
+    const renumberedPages = [];
+    const renumbered = kept.map((line) => {
+      const match = line.match(SCRIPT_PAGE_HEAD);
+      if (!match) return line;
+      const page = Number(match[1]);
+      const shift = targets.filter((target) => target < page).length;
+      if (!shift) return line;
+      renumberedPages.push({ from: page, to: page - shift });
+      return line.replace(/^(#{2,3}\s*P)0*(\d+)/, (_all, prefix) => `${prefix}${String(page - shift).padStart(2, "0")}`);
+    });
+
+    return {
+      text: `${renumbered.join("\n")}\n`,
+      deleted,
+      renumberedPages,
+      pageCount: existing.length - targets.length,
+      pageCountBefore: existing.length,
+    };
+  }
+
+  /**
+   * 删页时把被删页的图片目录移到 `slides/.deleted/<时间戳>/`（F-215）：
+   * 不直接 rm——已出的图是用户的钱和时间，误删要能捞回来。
+   * 返回 [{ pageId, trashPath }]。
+   */
+  function trashSlideDirs(deckId, { pages } = {}) {
+    const slidesDir = join(deckDir(deckId), "slides");
+    if (!existsSync(slidesDir)) return [];
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const trashDir = join(slidesDir, ".deleted", stamp);
+    const trashed = [];
+    for (const page of pages) {
+      const pageId = pageIdFromNumber(page);
+      const from = join(slidesDir, pageId);
+      if (!existsSync(from)) continue;
+      mkdirSync(trashDir, { recursive: true });
+      const to = join(trashDir, pageId);
+      renameSync(from, to);
+      trashed.push({ pageId, trashPath: to });
+    }
+    return trashed;
+  }
+
+  /** 按 [{ fromId, toId }] 重命名 slides 目录（删页后前移）；从页号小的开始，目标必须为空。 */
+  function renumberSlideDirs(deckId, mapping = []) {
+    const slidesDir = join(deckDir(deckId), "slides");
+    if (!existsSync(slidesDir)) return [];
+    const ordered = [...mapping]
+      .filter((item) => item.fromId !== item.toId)
+      .sort((left, right) => (pageNumberFromId(left.fromId) ?? 0) - (pageNumberFromId(right.fromId) ?? 0));
+    const moved = [];
+    try {
+      for (const item of ordered) {
+        const from = join(slidesDir, item.fromId);
+        if (!existsSync(from)) continue;
+        const to = join(slidesDir, item.toId);
+        if (existsSync(to)) {
+          throw new Error(`删页迁移冲突：${to} 已存在（slides/ 与 manifest 不一致；先核对 deck.json）`);
+        }
+        renameSync(from, to);
+        moved.push({ fromId: item.fromId, toId: item.toId });
       }
     } catch (error) {
       for (const item of [...moved].reverse()) {
@@ -700,7 +856,11 @@ export function createDeckWorkspace(config) {
     appendScriptPages,
     insertScriptPages,
     shiftSlideDirs,
+    deleteScriptPages,
+    trashSlideDirs,
+    renumberSlideDirs,
     scriptPageNumbers,
+    scriptPageTitle,
     /** 某页对应的原始源页号（源 baseline 图映射；页不存在返回 null）（F-208）。 */
     sourcePageOf(deckId, pageId) {
       const deck = manifest(deckId);

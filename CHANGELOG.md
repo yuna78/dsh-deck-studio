@@ -1,5 +1,58 @@
 # Changelog
 
+## [0.2.29] · 2026-11-08
+
+> 「agent 没有删除页面的工具啊。。。」——用户遇到 26 页里重复贴了一遍的 P25/P26，Agent 只能回答
+> 「这边没有删页接口」，然后建议改空占位。
+
+### 新增
+
+- **删页 `deck_script_delete_page`**（F-215 / ADR-0029）：`deckId / pages[]? / titles[]? / reason?`；
+  `pages` 是页号数组（1-based），`titles` 按标题找（「删掉那两页重复的」）。只出提案
+  （`waiting-user`，`kind=script-delete-page`），确认后落**一条** revision：被删页的
+  `slides/<pageId>/` 移到 `slides/.deleted/<时间戳>/`（**不直接删，误删可捞**），后面页目录整体前移，
+  manifest 的 slide id/order 重编号，`sourcePage` 保持原始源页（源 baseline 图不串页）。
+- 删封面页时新第一页接管封面；至少保留 1 页（删到 0 页报错并提示新建 deck）。
+- 待确认提案联动：落在被删页上的标 `superseded（page-deleted）`；落在前移页上的页号随之前移。
+- persona / FAQ 去掉「删页暂不支持」旧口径；添加页工具的描述同步指向新工具。
+
+### 验证
+
+- smoke 137/137（新增 4 条 F-215 契约：工具注册 / 删页重编号 + 目录回收 + 提案联动 / 边界不动工作副本 /
+  封面接管 + 按标题删）。
+
+### 设置页可配「视觉评审（审图）」通道（F-216）
+
+> 「审图工具不可用：视觉评审没有配置 baseURL」——桌面 profile 没配这条通道，而设置页只有出图节点，用户无从下手。
+
+- 设置页新增「视觉评审（审图）」：接口地址 / 模型名 / API Key 三栏，写进本机 `render-settings.json`（0600），
+  保存即生效，不用重启、不用改 profile；
+- `render-settings` 载荷新增 `vision`（baseURL / model / keyConfigured / configured / source），**不回显 key**；
+- 只保存视觉评审时不动出图节点与模式（避免把 real 打回 fake）；保存出图节点也不清空视觉评审；
+- 审图工具的三条报错改为指向设置页（以前只说 profile / env）。
+- 验证：smoke 139/139（新增 2 条 F-216 契约）。
+
+### 修复（F-217 · 桌面端会话下拉点了没反应）
+
+- 桌面 Dock 模式下，宿主覆盖层（fixed / z-index 40）盖住工作台 iframe 的 `#chatDockArea`；
+  会话下拉从头部向下展开，正好钻进被覆盖的矩形里 —— 看起来「点了没反应」。
+- 现在下拉开合时工作台发 `dsh-deck-studio:chat-dock-visibility`，宿主把覆盖层 `visibility:hidden` +
+  `pointer-events:none`（**保留布局与测量**，不触发重新定位），收起后立刻还原。
+- 统一走 `setChatSessionMenuOpen(open)`：点按钮 / 点外部 / Esc / 选中会话 四条路径都会通知宿主。
+- 回归：`verify/client-dock.mjs` 6/6（新增 F-217 契约：宿主监听 + 覆盖层隐藏方式 + 工作台开合通知）。
+
+### 改进（F-218 · 审图零配置：默认用 DSH 自己的模型）
+
+> 负责人：「审图就用 dsh 默认的模型走 headless 不行么，为啥要单独设置模型呢」——对，不该让用户为审图再配一个模型。
+
+- 审图（`deck_image_review`）默认走 **DSH 默认模型 + 一次性内部子代理**（`deck-studio-review` provider，
+  无 preset / 无工具），图片作为 image 内容块发送；**零配置、不需要额外 key**。
+- 独立视觉 relay 变成**可选覆盖**：设置页填了才走（想让审图用更便宜/更快的专用模型时）。
+- 编排不变：双转写（两次独立调用）+ 盲述 + 对照 + 五维打分仍在 `lib/image-review.js`，
+  传输抽成可注入的 `askVision`；新增 `lib/vision-subagent.js` 负责「发图 + 拿文字」。
+- 工具输出会标明「视觉通道：DSH 默认模型 · 内部子代理 / 独立 relay」，结论可追溯。
+- 验证：smoke 142/142（新增 3 条 F-218 契约：内容块形状 / 子代理通道生命周期 / **不配任何视觉模型也能出机器结论**）。
+
 ## [0.2.28] · 2026-11-07
 
 > 用户想在中间插一页，Agent 说「必须完全重新输出」——因为产品只有末端追加，persona 也写着「只追加到末尾」。

@@ -426,8 +426,15 @@ export async function runImageReview({
   settings = {},
   skipBlind = false,
   fetchImpl = fetch,
+  // F-218：把「怎么调视觉」做成可注入——默认走独立 relay（askVisionModel），
+  // 没配 relay 时由调用方注入「DSH 默认模型 + headless 子代理」的实现，用户零配置。
+  askVision = null,
 }) {
   const call = async (prompt, maxTokens) => {
+    if (typeof askVision === "function") {
+      const text = await askVision({ prompt, imagePath, maxTokens: maxTokens ?? settings.maxTokens });
+      return String(text ?? "");
+    }
     const result = await askVisionModel({
       imagePath,
       prompt,
@@ -486,8 +493,8 @@ export function attemptsOf(qa = {}) {
 
 /** 一次视觉调用（OpenAI 兼容 chat/completions，image_url 传 base64；不用 OCR）。 */
 export async function askVisionModel({ imagePath, prompt, baseURL, apiKey, model, maxTokens = 3000, timeoutMs = 180_000, fetchImpl = fetch }) {
-  if (!baseURL) throw new Error("视觉评审没有配置 baseURL：在 profile 的 deckStudio.imageReview 里设 baseURL，或设 env DSH_DECK_VISION_BASE_URL");
-  if (!model) throw new Error("视觉评审没有配置 model：在 profile 的 deckStudio.imageReview 里设 model，或设 env DSH_DECK_VISION_MODEL");
+  if (!baseURL) throw new Error("视觉评审（审图）没有配置接口地址：工作台 ⚙ 设置 →「视觉评审」里填接口地址 + 模型 + key（OpenAI 兼容 /v1），或设 env DSH_DECK_VISION_BASE_URL / profile 的 deckStudio.imageReview.baseURL");
+  if (!model) throw new Error("视觉评审（审图）没有配置模型：工作台 ⚙ 设置 →「视觉评审」里填模型名（或设 env DSH_DECK_VISION_MODEL）");
   if (!apiKey) throw new Error("视觉评审没有 API key：设 imageReview.apiKeyEnv 指向的环境变量（默认 WOCHENG_API_KEY）");
   const bytes = readFileSync(imagePath);
   const ext = extname(imagePath).toLowerCase();

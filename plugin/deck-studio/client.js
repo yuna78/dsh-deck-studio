@@ -318,6 +318,23 @@ div[data-sidebar-collapsed]{grid-template-columns:0px minmax(0px,1fr) 0px!import
         return () => dockState.listeners.delete(listener);
       }
 
+      /**
+       * Dock 覆盖层的临时隐藏（F-217）：工作台里的会话下拉展开时，需要一个「宿主不挡」的矩形。
+       * 覆盖层是宿主 DOM（fixed, z-index 40），iframe 里画的菜单永远在它下面——所以开合下拉时
+       * 由工作台发消息、宿主把覆盖层 visibility:hidden（保留布局，不触发重新测量）。
+       */
+      const dockVisibility = { hidden: false, listeners: new Set() };
+      function setDockHidden(hidden) {
+        const next = hidden === true;
+        if (dockVisibility.hidden === next) return;
+        dockVisibility.hidden = next;
+        for (const listener of dockVisibility.listeners) listener();
+      }
+      function subscribeDockHidden(listener) {
+        dockVisibility.listeners.add(listener);
+        return () => dockVisibility.listeners.delete(listener);
+      }
+
       /** 工作台 iframe 元素引用（React ref）；Dock 靠它测矩形 / 报「Dock 已就绪」。 */
       const frameState = { el: null, listeners: new Set() };
       function setWorkbenchFrame(node) {
@@ -400,6 +417,7 @@ div[data-sidebar-collapsed]{grid-template-columns:0px minmax(0px,1fr) 0px!import
         const sessionId = React.useSyncExternalStore(subscribeDockSession, () => dockState.sessionId);
         // 主区面板卸载/重建时 iframe 元素会换，Dock 必须跟着重算位置，否则切走再切回来就不见了。
         const frameEl = React.useSyncExternalStore(subscribeWorkbenchFrame, () => frameState.el);
+        const dockHidden = React.useSyncExternalStore(subscribeDockHidden, () => dockVisibility.hidden);
         const [rect, setRect] = React.useState(null);
         const [reference, setReference] = React.useState(null);
         React.useEffect(() => {
@@ -453,7 +471,9 @@ div[data-sidebar-collapsed]{grid-template-columns:0px minmax(0px,1fr) 0px!import
         const height = Math.max(160, Math.min(rect.height, viewportH - top));
         return h("div", {
           "data-deck-studio-chat-dock": "",
-          style: { position: "fixed", left: `${left}px`, top: `${top}px`, width: `${width}px`, height: `${height}px`, zIndex: 40, display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden", background: "var(--paper,#faf8f2)", borderRight: "1px solid var(--line,#e8e2d6)", pointerEvents: "auto" },
+          // 会话下拉展开时（工作台发 chat-dock-visibility:false）临时隐藏：保留布局与测量，
+          // 只把覆盖层让开，让 iframe 里的下拉能被看见、能点。
+          style: { position: "fixed", left: `${left}px`, top: `${top}px`, width: `${width}px`, height: `${height}px`, zIndex: 40, display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden", background: "var(--paper,#faf8f2)", borderRight: "1px solid var(--line,#e8e2d6)", pointerEvents: dockHidden ? "none" : "auto", visibility: dockHidden ? "hidden" : "visible" },
         }, h(DockErrorBoundary, null, h(SessionProvider, { session: reference }, renderSlot(CHAT_SLOT, {}))));
       }
       // 工作台左栏会把 DSH 原生 Chat 以 `/?decklineChat=1` 嵌进来（同源 iframe）。
@@ -948,6 +968,21 @@ div[data-sidebar-collapsed]{grid-template-columns:0px minmax(0px,1fr) 0px!import
         window.addEventListener("message", onMessage);
         return () => window.removeEventListener("message", onMessage);
       }, "deck-studio: chat-session bridge");
+
+      /* F-217：工作台开合会话下拉时，把 Dock 覆盖层临时让开（否则下拉画在覆盖层下面，看起来没反应）。 */
+      ctx.effect(() => {
+        const onMessage = (event) => {
+          const data = event?.data ?? {};
+          if (data?.type !== "dsh-deck-studio:chat-dock-visibility") return;
+          if (event.source !== (frameState.el?.contentWindow ?? null)) return;
+          setDockHidden(data.visible === false);
+        };
+        window.addEventListener("message", onMessage);
+        return () => {
+          window.removeEventListener("message", onMessage);
+          setDockHidden(false);
+        };
+      }, "deck-studio: chat-dock visibility bridge");
 
       /**
        * F-202B：桌面「原生会话 Dock」——shell.overlay 容器 + session 作用域内容槽

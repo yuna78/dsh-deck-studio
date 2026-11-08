@@ -194,7 +194,10 @@ export const FAQ_ENTRIES = [
       "deck_script_insert_page（at = 插到第 N 页之前，1-based；当前页数+1 等价追加）。都只出提案，确认后落一条 revision；" +
       ">= at 的页号整体后移、已出的图跟着内容走，不需要重出整份。\n" +
       "插页/追加都只新增，不会替换或移动已有页；如果稿子里已经有同标题的页，提案会明确警告「会出现两套内容」。\n" +
-      "新页没有画面要求也能先出草稿图，再决定要不要补写；删页暂不支持。",
+      "新页没有画面要求也能先出草稿图，再决定要不要补写。\n" +
+      "删页：deck_script_delete_page（pages = 页号数组，或 titles 按标题找），同样只出提案、确认后落一条 revision；\n" +
+      "后面页号整体前移、manifest 与 slides/<pageId>/versions 一起重编号；被删页的图片移到 slides/.deleted/<时间戳>/，\n" +
+      "**不直接删，误删可捞**。至少保留 1 页；删封面页时新第一页接管封面。",
   },
   {
     id: "delete-deck",

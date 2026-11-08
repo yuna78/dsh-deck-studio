@@ -40,6 +40,7 @@ import { REVIEW_AGENT_PROVIDER } from "./review-agent.js";
 import { plainReviewSummary, renderGapReviewMarkdown, renderReaderReviewMarkdown } from "./review-readers.js";
 import { applyCitationChecks, citationCheckPrompt, parseCitationCheck } from "./citation-check.js";
 import { attemptsOf, pickRenderExpectations, renderImageReviewMarkdown, runImageReview } from "./image-review.js";
+import { createSubagentVision } from "./vision-subagent.js";
 import { analyzeTitleChain, renderTitleChain } from "./title-chain.js";
 import { CONTRACT_FIELD_KEYS, contractTag, readPageContract, summarizeContracts, validatePageContract } from "./page-contract.js";
 import { compareScores, mergeScoreRecords, parseScoreOutput, renderScoreHistoryMarkdown, renderScoreSummary, scoreHistoryEntry, scoreReviewerPrompt } from "./review-score.js";
@@ -960,7 +961,7 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
       "给 deck 追加页（F-99：页数可以在对话里改）。只追加到最后一页之后，不重排既有页；" +
       "生成 `### Pxx · 标题` 分节 + diff 并进入 waiting-user，等用户在 Chat 里确认后再用 " +
       "deck_revision_confirm 落 revision。一次可以加多页（pages 数组，或 count + titles）。" +
-      "不支持在中间插入 / 删除 / 换位——那会让 slides/<pageId> 版本目录与 asset 错配。",
+      "不支持在中间插入（用 deck_script_insert_page）或删页（用 deck_script_delete_page）；换位暂不支持。",
     parameters: {
       type: "object",
       properties: {
@@ -1216,6 +1217,137 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
           `确认后会迁移 slides/<pageId>/versions 目录——**已出的图跟着各自内容走，不需要重出整份**。` +
           `${pendingShifted.length ? `\n另有 ${pendingShifted.length} 条待确认提案落在后移页上（${pendingShifted.map((item) => item.pageId).join(" / ")}），确认时会自动改到新页号。` : ""}` +
           `\n\n${diff || "(无文本差异)"}\n` +
+          `请在 Chat 里确认；确认后才写 script revision + manifest + 目录迁移。`,
+      };
+    }),
+  });
+
+  // ── 3.7 deck_script_delete_page ─────────────────────────────────────────────
+  tools.push({
+    name: "deck_script_delete_page",
+    description:
+      "删除页（F-215：用户说「把 P25、P26 删掉 / 这两页重复了 / 删了最后两节」时用它）。" +
+      "`pages` = 要删的页号数组（1-based）。生成提案并进入 waiting-user，用户确认后再用 deck_revision_confirm 落版。" +
+      "确认后：被删页的图片目录移到 `slides/.deleted/<时间戳>/`（不直接删，误删可捞），" +
+      "后面页号整体前移，manifest 的 slide id/order 与 slides/<pageId>/versions 一起重编号——" +
+      "**已出的图跟着各自内容走，不需要整份重出**，绝对不要建议用户整份重出。" +
+      "至少保留 1 页；删封面页时新第一页接管封面。不传 pages 时按 title 匹配。" +
+      "表格惯例（没有 `### Pxx` 分节）的 script 不支持删页，如实说明即可。",
+    parameters: {
+      type: "object",
+      properties: {
+        deckId: { type: "string" },
+        pages: {
+          type: "array",
+          items: { type: "number" },
+          description: "要删除的页号（1-based，可多个）。例：删 P25、P26 → [25, 26]",
+        },
+        titles: {
+          type: "array",
+          items: { type: "string" },
+          description: "可选：按标题找页（pages 为空时才用）；找到几页就删几页，找不到报错",
+        },
+        reason: { type: "string", description: "为什么删（写进 trace）" },
+      },
+      required: ["deckId"],
+      additionalProperties: false,
+    },
+    output: { schema: { type: "object", properties: { proposalId: { type: "string" }, status: { type: "string" }, pageCount: { type: "number" } } }, render: (_args, value) => [{ type: "text", text: String(value?.text ?? "") }] },
+    execute: withToolEvent(store, "deck_script_delete_page", async (args, exec) => {
+      const adapter = adapterFor(args.deckId);
+      const deck = workspace.ensureDeck(adapter, { styleBrief: config.styleBrief });
+      const current = workspace.scriptCurrent(deck.id);
+      if (current == null) throw new Error(`script 工作副本缺失：${deck.id}`);
+
+      let targets = (Array.isArray(args.pages) ? args.pages : []).map((page) => Number(page)).filter((page) => Number.isInteger(page) && page > 0);
+      const wantedTitles = (Array.isArray(args.titles) ? args.titles : []).map((title) => String(title ?? "").trim()).filter(Boolean);
+      if (!targets.length && wantedTitles.length) {
+        const existing = workspace.scriptPageNumbers(current);
+        const sections = existing.map((page) => ({ page, title: String(workspace.scriptPageTitle(current, page) ?? "").trim() }));
+        const found = [];
+        for (const title of wantedTitles) {
+          const hit = sections.find((section) => section.title.includes(title) || title.includes(section.title));
+          if (!hit) throw new Error(`按标题找不到页：「${title}」（现有：${sections.map((section) => `P${String(section.page).padStart(2, "0")} ${section.title}`).join(" / ")}）`);
+          if (!found.includes(hit.page)) found.push(hit.page);
+        }
+        targets = found;
+      }
+      if (!targets.length) throw new Error("删页需要 pages（要删的页号数组）或 titles（按标题找）");
+      targets = [...new Set(targets)].sort((left, right) => left - right);
+
+      const preview = workspace.deleteScriptPages(current, { pages: targets });
+      const deletedIds = preview.deleted.map((item) => `p${String(item.page).padStart(2, "0")}`);
+      const pageIds = deletedIds;
+      const diff = scriptDiff(current, preview.text);
+      const renumberLabel = preview.renumberedPages.length
+        ? `原 ${preview.renumberedPages.map((item) => `P${String(item.from).padStart(2, "0")}`).join(" / ")} 前移为 ${preview.renumberedPages.map((item) => `P${String(item.to).padStart(2, "0")}`).join(" / ")}`
+        : "没有页需要前移（删的是末尾页）";
+      const pending = workspace.listProposals(deck.id, "waiting-user");
+      const pendingOnDeleted = pending.filter((proposal) => proposal.kind !== "script-add-page" && proposal.kind !== "script-insert-page" && proposal.kind !== "script-delete-page" && (targets.includes(Number(proposal.page)) || (Array.isArray(proposal.pageIds) && proposal.pageIds.some((id) => targets.includes(Number(String(id).replace(/^p/i, "")))))));
+      const pendingShifted = pending.filter((proposal) => proposal.kind !== "script-add-page" && proposal.kind !== "script-insert-page" && proposal.kind !== "script-delete-page" && Number(proposal.page) > Math.min(...targets) && !pendingOnDeleted.includes(proposal));
+
+      const proposal = {
+        proposalId: newProposalId(),
+        deckId: deck.id,
+        pageId: pageIds[0],
+        page: preview.deleted[0].page,
+        pageIds,
+        kind: "script-delete-page",
+        field: "delete-page",
+        pages: targets,
+        deleted: preview.deleted,
+        renumberedPages: preview.renumberedPages,
+        pageCountBefore: deck.slides.length,
+        pageCountAfter: preview.pageCount,
+        before: "",
+        after: preview.text,
+        value: "",
+        diff,
+        reason: String(args.reason ?? ""),
+        status: "waiting-user",
+        createdAt: proposalNow(),
+        sessionId: sessionIdOf(exec),
+      };
+      workspace.saveProposal(proposal);
+
+      const task = store.taskCreate({
+        kind: "edit",
+        deckId: deck.id,
+        slideIds: pageIds,
+        actor: "agent",
+        sessionId: proposal.sessionId,
+        inputRefs: [`script:${deck.id}#delete-page@${pageIds.join(",")}`],
+      });
+      store.taskUpdate(task.taskId, { status: "running", actor: "agent" });
+      store.taskUpdate(task.taskId, { status: "waiting-user", actor: "agent", inputRefs: [`script:${deck.id}#delete-page@${pageIds.join(",")}`, `proposal:${proposal.proposalId}`] });
+      store.recordEvent({
+        type: "deck.edit",
+        sessionId: proposal.sessionId,
+        taskId: task.taskId,
+        deckId: deck.id,
+        slideIds: pageIds,
+        actor: "agent",
+        status: "waiting-user",
+        payload: { proposalId: proposal.proposalId, field: "delete-page", pages: targets, reason: proposal.reason, diff },
+      });
+
+      return {
+        proposalId: proposal.proposalId,
+        taskId: task.taskId,
+        deckId: deck.id,
+        slideIds: pageIds,
+        status: "waiting-user",
+        pageCount: preview.pageCount,
+        pages: targets,
+        diff,
+        text:
+          `删页提案 ${proposal.proposalId} 已进入 waiting-user：${preview.pageCountBefore} 页 → ${preview.pageCount} 页` +
+          `（删掉 ${preview.deleted.map((item) => `P${String(item.page).padStart(2, "0")}${item.title ? ` ${item.title}` : ""}`).join(" / ")}；${renumberLabel}）。\n` +
+          `确认后：这些页的图片目录移到 \`slides/.deleted/<时间戳>/\`（**不直接删，误删可捞**），后面页号整体前移，` +
+          `**已出的图跟着各自内容走，不需要重出整份**。\n` +
+          `${pendingOnDeleted.length ? `⚠ 有 ${pendingOnDeleted.length} 条待确认提案正落在被删页上（${pendingOnDeleted.map((item) => item.pageId).join(" / ")}），确认时会自动标为已作废。\n` : ""}` +
+          `${pendingShifted.length ? `另有 ${pendingShifted.length} 条待确认提案落在前移页上（${pendingShifted.map((item) => item.pageId).join(" / ")}），确认时会自动改到新页号。\n` : ""}` +
+          `\n${diff || "(无文本差异)"}\n` +
           `请在 Chat 里确认；确认后才写 script revision + manifest + 目录迁移。`,
       };
     }),
@@ -3282,7 +3414,7 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
       additionalProperties: false,
     },
     output: { schema: { type: "object", properties: { deckId: { type: "string" }, pageId: { type: "string" }, gate: { type: "boolean" } } }, render: (_args, value) => [{ type: "text", text: String(value?.text ?? "") }] },
-    execute: withToolEvent(store, "deck_image_review", async (args) => {
+    execute: withToolEvent(store, "deck_image_review", async (args, exec) => {
       const adapter = adapterFor(args.deckId);
       const deck = workspace.ensureDeck(adapter, { styleBrief: config.styleBrief });
       const rawPage = String(args.page ?? "").trim();
@@ -3337,6 +3469,28 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
 
       const settings = config.imageReview ?? {};
       const apiKey = env[settings.apiKeyEnv] || (settings.apiKeyFile ? readKeyFromFile(settings.apiKeyFile, settings.apiKeyEnv) : "");
+      /**
+       * F-218：审图零配置——优先用独立 relay（配了才走），否则用 **DSH 默认模型**（一次性内部子代理）。
+       * 用户不需要为了审图再配一个模型。
+       */
+      const relayReady = Boolean(String(settings.baseURL ?? "").trim() && String(settings.model ?? "").trim());
+      let visionTransport = "relay";
+      let askVision = null;
+      if (!relayReady) {
+        const runtime = resolveSubagents();
+        if (!runtime?.startActivation) {
+          throw new Error("审图不可用：既没有配置独立视觉通道，当前宿主也没有内部子代理服务（subagents）。可以在 ⚙ 设置 →「视觉评审」填一个支持图片输入的模型。");
+        }
+        askVision = createSubagentVision({
+          runtime,
+          parent: exec.agent ?? null,
+          cwd: String(config.workspacePath ?? "").trim() || undefined,
+          signal: exec.signal,
+          timeoutMs: Number(settings.timeoutMs) || 180_000,
+          label: `deck-vision:${deck.id}:${pageId}`,
+        });
+        visionTransport = "dsh";
+      }
       // C1 + C2 + C3 + C4：编排在 lib/image-review.js（verify 脚本共用同一条路径）。
       // 封面页：署名 / 场合 / 日期是版式要求，判「超载」时要放过（C2 校正，见 normalizeContrastForPage）。
       const isCover = slide.order === 1 || /封面/.test(String(slide.fields?.["角色"] ?? ""));
@@ -3353,6 +3507,7 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
         settings: { ...settings, apiKey },
         skipBlind: args.skipBlind === true,
         fetchImpl: visionFetch ?? fetch,
+        askVision,
       });
       let { fidelity, dual, meaning, contrast, review, advice, blind } = outcome;
       const { transcription, blindError } = outcome;
@@ -3420,7 +3575,8 @@ export function defineDeckTools({ store, workspace, adapters, config, env = proc
         return `✗ 错 ${diff.field}：应为「${String(diff.expected).slice(0, 40)}」，图上「${String(diff.actual).slice(0, 40)}」${diff.ratio != null ? `（差异 ${(diff.ratio * 100).toFixed(1)}%）` : ""}`;
       });
       const text = [
-        `${pageId}（${versionDirs[versionDirs.length - 1]}）图片评审：${record.verdict} · 门禁${record.gate ? "过" : "不过"}`,
+        `${pageId}（${versionDirs[versionDirs.length - 1]}）图片评审：${record.verdict} · 门禁${record.gate ? "过" : "不过"}` +
+          `（视觉通道：${visionTransport === "dsh" ? "DSH 默认模型 · 内部子代理" : "独立 relay"}）`,
         `五维：${scoreLine}（总分 ${review.total}/25）`,
         "",
         `保真（转写两次${dual.stable ? "一致" : `不一致：${dual.unstable.join(" / ")}`}）：${fidelity.verdict}`,
